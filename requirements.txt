@@ -1,0 +1,51 @@
+# =============================================================================
+# 企业级智能数据分析 Agent - 依赖清单
+# =============================================================================
+
+# --- Web 框架与交互 ---
+streamlit>=1.28.0
+streamlit-aggrid>=0.3.4
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+jinja2>=3.1.0
+python-multipart>=0.0.12
+
+# --- LLM & Agent 框架 ---
+langchain>=0.3.0
+langchain-community>=0.3.0
+langchain-openai>=0.2.0
+langchain-ollama>=0.2.0
+
+# --- 全文检索 (BM25) ---
+rank-bm25>=0.2.2
+jieba>=0.42.1  # 中文分词（用于 TF-IDF 向量化和语义缓存）
+
+# --- 缓存 ---
+redis>=5.0.0
+fakeredis>=2.19.0  # 本地开发 Redis 降级方案
+
+# --- 数据库（SQLAlchemy 多数据库支持）---
+sqlalchemy>=2.0.0
+pymysql>=1.0.0  # MySQL 驱动
+
+# --- 数据分析 & 可视化 ---
+pandas>=2.1.0
+numpy>=1.24.0
+matplotlib>=3.7.0
+plotly>=5.17.0
+pyecharts>=2.0.3
+
+# --- SQL 验证 ---
+sqlglot>=20.0.0  # SQL 语法解析与校验
+
+# --- 文件处理（PDF / Excel） ---
+PyPDF2>=3.0.0     # PDF 文本提取
+openpyxl>=3.1.0   # Excel 读写（pandas 引擎）
+
+# --- 评估框架 ---
+deepeval>=1.0.0
+
+# --- 工具库 ---
+pydantic>=2.0.0
+python-dotenv>=1.0.0
+rich>=13.7.0

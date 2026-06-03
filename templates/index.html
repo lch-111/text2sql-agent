@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>企业级智能数据分析 Agent</title>
+    <script src="{{ url_for('static', path='js/echarts.min.js') }}"></script>
+    <script>if (typeof echarts === 'undefined') { document.write('<script src="https://cdn.jsdelivr.net/npm/echarts@5.5.0/dist/echarts.min.js"><\/script>'); }</script>
+    <link rel="stylesheet" href="{{ url_for('static', path='css/style.css') }}">
+</head>
+<body>
+<div id="app">
+
+    <!-- Header -->
+    <header id="app-header">
+        <h1>🐱智能数据分析指挥中心</h1>
+        <span class="header-info">Text-to-SQL Agent · 语义缓存 · 混合检索</span>
+    </header>
+
+    <div id="app-layout">
+        <!-- Sidebar -->
+        <aside id="sidebar">
+
+            <!-- Connection status shortcut -->
+            <div class="sidebar-section">
+                <h3>📊 数据大屏</h3>
+                <p style="font-size:12px;color:var(--text-muted);line-height:1.6;">
+                    连接数据库后，在「数据大屏」标签页中添加图表。<br>
+                    支持柱状图、折线图、饼图、散点图等多种类型。
+                </p>
+            </div>
+
+            <!-- File Upload -->
+            <div class="sidebar-section">
+                <h3>📁 数据导入</h3>
+                <div class="upload-zone" id="upload-zone">
+                    <div class="icon">📄</div>
+                    <p>点击或拖拽上传<br>CSV / Excel / PDF</p>
+                </div>
+                <input type="file" id="file-input" accept=".csv,.xlsx,.xls,.pdf" style="display:none;">
+                <div id="upload-info"></div>
+                <button id="btn-clear-file" style="width:100%;padding:6px;margin-top:6px;background:var(--bg-input);color:var(--text-secondary);border:1px solid var(--border-color);border-radius:var(--radius);cursor:pointer;font-size:12px;">🗑️ 清除文件</button>
+            </div>
+
+            <!-- Database Connection -->
+            <div class="sidebar-section">
+                <h3>🗄️ 数据库连接</h3>
+
+                <label>数据库类型</label>
+                <select id="db-type">
+                    <option value="mysql">MySQL</option>
+                    <option value="postgres">PostgreSQL</option>
+                    <option value="sqlite">SQLite</option>
+                </select>
+
+                <div id="db-connection-fields">
+                    <label>主机地址</label>
+                    <input type="text" id="db-host" class="db-input" placeholder="host.docker.internal" value="host.docker.internal">
+
+                    <label>端口</label>
+                    <input type="number" id="db-port" class="db-input" placeholder="3306" value="3306">
+
+                    <label>数据库名</label>
+                    <input type="text" id="db-database" class="db-input" placeholder="输入数据库名">
+
+                    <label>用户名</label>
+                    <input type="text" id="db-user" class="db-input" placeholder="root" value="root">
+
+                    <label>密码</label>
+                    <input type="password" id="db-password" class="db-input" placeholder="密码">
+                </div>
+
+                <div id="db-sqlite-fields" style="display:none;">
+                    <label>数据库文件路径</label>
+                    <input type="text" id="db-sqlite-path" class="db-input" placeholder="data/retail_warehouse.db" value="data/retail_warehouse.db">
+                </div>
+
+                <div style="display:flex;gap:6px;margin-top:8px;">
+                    <button id="btn-test-connection" style="flex:1;padding:6px;background:var(--bg-input);color:var(--text-secondary);border:1px solid var(--border-color);border-radius:var(--radius);cursor:pointer;font-size:12px;">🔌 测试连接</button>
+                    <button id="btn-connect-db" style="flex:1;padding:6px;background:var(--accent-blue);color:#fff;border:none;border-radius:var(--radius);cursor:pointer;font-size:12px;font-weight:600;">🔗 连接</button>
+                </div>
+
+                <div id="db-connection-status" style="margin-top:8px;font-size:12px;color:var(--text-muted);padding:6px 8px;background:var(--bg-input);border-radius:var(--radius);display:none;"></div>
+                <button id="btn-reset-db" style="width:100%;padding:6px;margin-top:6px;background:transparent;color:var(--text-muted);border:1px dashed var(--border-color);border-radius:var(--radius);cursor:pointer;font-size:11px;display:none;">↩️ 重置为默认连接</button>
+            </div>
+
+            <!-- System Status -->
+            <div class="sidebar-section">
+                <h3>🖥️ 系统状态</h3>
+                <div class="status-item">
+                    <span>缓存服务</span>
+                    <span id="status-cache"><span class="status-dot gray"></span> 检测中</span>
+                </div>
+                <div class="status-item">
+                    <span>数据库</span>
+                    <span id="status-db"><span class="status-dot gray"></span> 检测中</span>
+                </div>
+                <div style="margin-top:10px;display:flex;flex-direction:column;gap:4px;">
+                    <button id="btn-clear-cache" style="padding:6px;background:var(--bg-input);color:var(--text-secondary);border:1px solid var(--border-color);border-radius:var(--radius);cursor:pointer;font-size:12px;">🔄 清空缓存</button>
+                    <button id="btn-rebuild-index" style="padding:6px;background:var(--bg-input);color:var(--text-secondary);border:1px solid var(--border-color);border-radius:var(--radius);cursor:pointer;font-size:12px;">🏗️ 重建索引</button>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main id="main-content">
+            <!-- Tab Bar -->
+            <nav id="tab-bar">
+                <button class="tab-btn active" data-tab="chat">💬 智能对话</button>
+                <button class="tab-btn" data-tab="dashboard">📊 数据大屏</button>
+                <button class="tab-btn" data-tab="monitor">⚙️ 系统监控</button>
+                <button class="tab-btn" data-tab="tables">📋 表格信息</button>
+                <button class="tab-btn" data-tab="eval">📋 评估报告</button>
+            </nav>
+
+            <!-- Tab: Chat -->
+            <div id="tab-chat" class="tab-pane active">
+                <div id="chat-header">
+                    <span id="chat-title">💬 智能对话</span>
+                    <button id="new-chat-btn">+ 新对话</button>
+                </div>
+                <div id="chat-messages">
+                    <!-- Scroll-to-bottom button -->
+                    <button id="scroll-bottom-btn" style="display:none;" title="回到最新">↓</button>
+                    <!-- Messages rendered by chat.js -->
+                </div>
+                <div id="chat-input-area">
+                    <div id="quick-questions">
+                        <button class="quick-btn" data-q="统计每个省份的订单总金额">各省销售额</button>
+                        <button class="quick-btn" data-q="查询消费最多的前5名用户">Top消费用户</button>
+                        <button class="quick-btn" data-q="统计每个月的销售额">月度销售</button>
+                        <button class="quick-btn" data-q="查询各个商品类别的销售数量">品类销量</button>
+                    </div>
+                    <div id="input-row">
+                        <textarea id="chat-textarea" placeholder="输入自然语言问题，AI 自动生成 SQL..." rows="1"></textarea>
+                        <button id="send-btn" disabled>发送</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab: Dashboard -->
+            <div id="tab-dashboard" class="tab-pane">
+                <!-- Chart Builder -->
+                <div class="chart-builder">
+                    <div class="builder-header">
+                        <h3>📊 自定义图表</h3>
+                        <div class="builder-header-actions">
+                            <span id="builder-table-count" class="builder-info"></span>
+                            <button id="btn-toggle-builder" class="builder-toggle">+ 添加图表</button>
+                        </div>
+                    </div>
+                    <div id="builder-form" class="builder-form" style="display:none;">
+                        <div class="builder-row">
+                            <div class="builder-field">
+                                <label>数据表</label>
+                                <select id="builder-table">
+                                    <option value="">-- 选择表 --</option>
+                                </select>
+                            </div>
+                            <div class="builder-field">
+                                <label>X 轴（类别/维度）</label>
+                                <select id="builder-x-column" disabled>
+                                    <option value="">请先选择表</option>
+                                </select>
+                            </div>
+                            <div class="builder-field">
+                                <label>Y 轴（数值/指标）</label>
+                                <select id="builder-y-column" disabled>
+                                    <option value="">请先选择表</option>
+                                </select>
+                            </div>
+                            <div class="builder-field">
+                                <label>图表类型</label>
+                                <select id="builder-chart-type">
+                                    <option value="bar">📊 柱状图</option>
+                                    <option value="line">📈 折线图</option>
+                                    <option value="pie">🥧 饼图</option>
+                                    <option value="scatter">✦ 散点图</option>
+                                    <option value="funnel">🔻 漏斗图</option>
+                                    <option value="radar">🕸️ 雷达图</option>
+                                    <option value="treemap">🗂️ 树图</option>
+                                    <option value="heatmap">🔥 热力图</option>
+                                    <option value="sankey">🔗 桑基图</option>
+                                    <option value="gauge">🎯 仪表盘</option>
+                                    <option value="boxplot">📦 箱线图</option>
+                                    <option value="parallel">〰️ 平行坐标</option>
+                                    <option value="sunburst">🌅 旭日图</option>
+                                </select>
+                            </div>
+                            <div class="builder-field">
+                                <label>风格主题</label>
+                                <select id="builder-chart-style">
+                                    <optgroup label="默认色系">
+                                        <option value="blue">蓝</option>
+                                        <option value="green">绿</option>
+                                        <option value="red">红</option>
+                                        <option value="orange">橙</option>
+                                        <option value="purple">紫</option>
+                                        <option value="cyan">青</option>
+                                        <option value="gray">灰</option>
+                                    </optgroup>
+                                    <optgroup label="浅色系">
+                                        <option value="lightBlue">浅蓝</option>
+                                        <option value="lightGreen">浅绿</option>
+                                        <option value="lightPink">浅粉</option>
+                                        <option value="lightOrange">浅橙</option>
+                                        <option value="lightPurple">浅紫</option>
+                                        <option value="lightCyan">浅青</option>
+                                        <option value="lightGray">浅灰</option>
+                                    </optgroup>
+                                    <optgroup label="深色系">
+                                        <option value="darkBlue">深蓝</option>
+                                        <option value="darkGreen">深绿</option>
+                                        <option value="darkRed">深红</option>
+                                        <option value="darkOrange">深橙</option>
+                                        <option value="darkPurple">深紫</option>
+                                        <option value="darkCyan">深青</option>
+                                        <option value="darkGray">深灰</option>
+                                    </optgroup>
+                                </select>
+                            </div>
+                            <div class="builder-field">
+                                <label>标题</label>
+                                <input type="text" id="builder-title" class="builder-input" placeholder="图表标题（可选）">
+                            </div>
+                            <div class="builder-field builder-action">
+                                <label>&nbsp;</label>
+                                <button id="btn-add-chart" class="btn-add-chart">➕ 添加图表</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Dynamic Chart Grid -->
+                <div id="dashboard-grid">
+                    <div class="empty-state" id="dashboard-empty">
+                        <div class="icon">📊</div>
+                        <p>暂无图表</p>
+                        <p style="font-size:13px;color:var(--text-muted);margin-top:4px;">点击上方「添加图表」按钮，从已连接的数据库中选择表和字段创建图表</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab: Monitor -->
+            <div id="tab-monitor" class="tab-pane">
+                <div class="monitor-grid">
+                    <div class="monitor-box">
+                        <h3>⚡ 缓存命中率</h3>
+                        <div class="chart-container" id="chart-cache-gauge"></div>
+                    </div>
+                    <div class="monitor-box">
+                        <h3>📊 缓存统计</h3>
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;padding:16px;">
+                            <div class="metric">
+                                <div class="metric-value" id="monitor-hit-rate">—</div>
+                                <div class="metric-label">综合命中率</div>
+                            </div>
+                            <div class="metric">
+                                <div class="metric-value" id="monitor-l1-rate">—</div>
+                                <div class="metric-label">L1 精确命中率</div>
+                            </div>
+                            <div class="metric">
+                                <div class="metric-value" id="monitor-l2-rate">—</div>
+                                <div class="metric-label">L2 语义命中率</div>
+                            </div>
+                            <div class="metric">
+                                <div class="metric-value" id="monitor-queries">—</div>
+                                <div class="metric-label">总查询次数</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Query Log Placeholder -->
+                <div class="monitor-box">
+                    <h3>📝 查询记录</h3>
+                    <p style="color:var(--text-muted);font-size:13px;padding:12px;">执行一次查询后在此处显示记录</p>
+                </div>
+
+                <!-- Architecture Info -->
+                <div class="monitor-box" style="margin-top:16px;">
+                    <h3>🏗️ 系统架构</h3>
+                    <pre style="background:#3d8cff;border-radius:6px;padding:16px;font-size:12px;line-height:1.6;overflow-x:auto;color:#ffffff;">
+┌─ Route Chain ─────────────────────────────────────────────┐
+│  用户提问 + (可选: 文件上传)                                │
+│    → SQL_ROUTE (数据库查询)       → Text-to-SQL Agent     │
+│    → DOCUMENT_ROUTE (文件分析)    → Document RAG          │
+│    → CONTROL (大屏控制)           → Dashboard Control     │
+└──────────────────────────────────────────────────────────┘
+
+Text-to-SQL Agent 内部链路:
+用户提问 → 混合检索(BM25+向量+RRF) → CoT Prompt → LLM SQL生成
+    ↓                                                      ↓
+L1/L2缓存 ← 结果返回 ← 执行SQL ← sqlglot校验 ← 自我修正(×3)
+                      ↑
+                Error Recovery Chain
+</pre>
+                </div>
+            </div>
+
+            <!-- Tab: Tables -->
+            <div id="tab-tables" class="tab-pane">
+                <div id="tables-content">
+                    <h2 style="font-size:16px;font-weight:600;margin-bottom:12px;color:var(--text-primary);">📋 数据库表格信息</h2>
+                    <p style="font-size:13px;color:var(--text-muted);margin-bottom:16px;">连接数据库后，在此查看表结构、字段信息和数据预览。</p>
+                    <div id="table-info-section">
+                        <div id="table-list-container">
+                            <div id="table-list-loading" style="font-size:12px;color:var(--text-muted);">请先连接数据库</div>
+                            <div id="table-list" style="display:none;"></div>
+                        </div>
+                        <div id="table-detail" style="display:none;margin-top:12px;border-top:1px solid var(--border-color);padding-top:12px;">
+                            <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
+                                <span id="table-detail-name" style="font-size:14px;font-weight:600;color:var(--text-primary);"></span>
+                                <button id="btn-close-table-detail" style="background:none;border:none;color:var(--text-muted);cursor:pointer;font-size:18px;padding:2px 8px;">✕</button>
+                            </div>
+                            <div id="table-detail-schema" style="font-size:13px;margin-bottom:8px;"></div>
+                            <div id="table-detail-preview" style="font-size:13px;"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab: Eval -->
+            <div id="tab-eval" class="tab-pane">
+                <div id="eval-content">
+                    <div class="eval-metrics">
+                        <div class="monitor-box">
+                            <div class="metric">
+                                <div class="metric-value" id="eval-accuracy">—</div>
+                                <div class="metric-label">执行准确率</div>
+                            </div>
+                        </div>
+                        <div class="monitor-box">
+                            <div class="metric">
+                                <div class="metric-value" id="eval-validity">—</div>
+                                <div class="metric-label">SQL 语法正确率</div>
+                            </div>
+                        </div>
+                        <div class="monitor-box">
+                            <div class="metric">
+                                <div class="metric-value" id="eval-total">—</div>
+                                <div class="metric-label">测试用例数</div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="monitor-box">
+                        <h3>📊 各类别准确率</h3>
+                        <div class="chart-container tall" id="chart-eval-category"></div>
+                    </div>
+                </div>
+            </div>
+
+        </main>
+    </div>
+</div>
+
+<script src="{{ url_for('static', path='js/utils.js') }}?v=2.2.3"></script>
+<script src="{{ url_for('static', path='js/charts.js') }}?v=2.2.3"></script>
+<script src="{{ url_for('static', path='js/chat.js') }}?v=2.2.3"></script>
+<script src="{{ url_for('static', path='js/app.js') }}?v=2.2.3"></script>
+</body>
+</html>

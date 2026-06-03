@@ -1,0 +1,207 @@
+# =============================================================================
+# Docker Compose — 企业级智能数据分析 Agent
+# =============================================================================
+# 使用:
+#   docker compose up -d            # 后台启动所有服务
+#   docker compose logs -f app      # 查看应用日志
+#   docker compose down -v          # 停止并清除数据
+#
+# 环境变量文件: .env（参考 .env.example）
+# =============================================================================
+
+services:
+  # ===========================================================================
+  # Redis 缓存服务
+  # 功能：L1 精确缓存（MD5 精确匹配）+ L2 语义缓存（向量相似度匹配）
+  # ===========================================================================
+  redis:
+    image: redis:7-alpine
+    container_name: text2sql-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command:
+      - redis-server
+      - --appendonly yes
+      - --appendfsync everysec
+      - --save 60 1
+      - --save 300 10
+      - --maxmemory 512mb
+      - --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    networks:
+      - text2sql_net
+
+  # ===========================================================================
+  # MySQL 关系数据库（默认关闭，优先使用 Windows 本机 MySQL）
+  # 如需启用：docker compose --profile manual up -d mysql
+  # ===========================================================================
+  mysql:
+    image: mysql:8.0
+    container_name: text2sql-mysql
+    restart: unless-stopped
+    profiles:
+      - manual
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_secret}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-text2sql}
+      MYSQL_USER: ${MYSQL_USER:-text2sql}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-text2sql_secret}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./data/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    networks:
+      - text2sql_net
+
+  # ===========================================================================
+  # PostgreSQL 关系数据库（可选）
+  # 功能：SQLite 的替代方案，生产环境使用
+  # ===========================================================================
+  db:
+    image: postgres:16-alpine
+    container_name: text2sql-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: text2sql
+      POSTGRES_USER: text2sql
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-text2sql_secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./data/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U text2sql -d text2sql"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    profiles:
+      - full
+    networks:
+      - text2sql_net
+
+  # ===========================================================================
+  # FastAPI 应用服务
+  # ===========================================================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: text2sql-app
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - app_data:/app/data
+      - app_logs:/app/logs
+      - app_eval:/app/eval_results
+    environment:
+      # ---- Redis 缓存 ----
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - CACHE_SIMILARITY_THRESHOLD=0.95
+      - CACHE_TTL_SECONDS=3600
+
+      # ---- LLM 配置 ----
+      - LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - OLLAMA_BASE_URL=${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:7b}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_BASE_URL=${OPENAI_BASE_URL:-}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+
+      # ---- 数据库（默认 SQLite，上传 CSV 自动建表）----
+      - DB_TYPE=${DB_TYPE:-sqlite}
+      - DB_PATH=${DB_PATH:-data/retail_warehouse.db}
+      # MySQL（连接 Windows 本机 MySQL，通过 host.docker.internal）
+      - MYSQL_HOST=${MYSQL_HOST:-host.docker.internal}
+      - MYSQL_PORT=${MYSQL_PORT:-3306}
+      - MYSQL_DATABASE=${MYSQL_DATABASE:-}
+      - MYSQL_USER=${MYSQL_USER:-text2sql}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD:-text2sql_secret}
+      - PG_HOST=db
+      - PG_PORT=5432
+      - PG_DATABASE=text2sql
+      - PG_USER=text2sql
+      - PG_PASSWORD=${POSTGRES_PASSWORD:-text2sql_secret}
+
+      # ---- LangSmith 链路追踪 ----
+      - LANGSMITH_TRACING=${LANGSMITH_TRACING:-false}
+      - LANGSMITH_API_KEY=${LANGSMITH_API_KEY:-}
+      - LANGSMITH_PROJECT=${LANGSMITH_PROJECT:-text2sql-agent}
+      - LANGSMITH_ENDPOINT=${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - text2sql_net
+    entrypoint: ["/app/entrypoint.sh"]
+
+  # ===========================================================================
+  # 后台 Worker（可选）
+  # 功能：异步执行耗时任务（批量评估、数据同步等）
+  # ===========================================================================
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: text2sql-worker
+    restart: unless-stopped
+    command: >
+      sh -c "
+      echo '[Worker] 启动完成，等待任务...' &&
+      while true; do
+        sleep 60
+      done
+      "
+    volumes:
+      - app_data:/app/data
+      - app_logs:/app/logs
+      - app_eval:/app/eval_results
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - DB_PATH=data/retail_warehouse.db
+    depends_on:
+      redis:
+        condition: service_healthy
+    profiles:
+      - full
+    networks:
+      - text2sql_net
+
+# ============================================================================
+# 持久化卷
+# ============================================================================
+volumes:
+  redis_data:
+  mysql_data:
+  postgres_data:
+  app_data:
+  app_logs:
+  app_eval:
+
+# ============================================================================
+# 内部网络
+# ============================================================================
+networks:
+  text2sql_net:
+    driver: bridge
