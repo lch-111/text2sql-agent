@@ -66,13 +66,13 @@
 │                                                                  │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌──────────────────┐  │
 │  │ 术语映射  │  │Schema加载│  │语义解析   │  │ SQL 生成         │  │
-│  │term_map. │→│INFORMA-  │→│qwen/deep │→│ deepseek-v4-pro   │  │
+│  │term_map. │→│INFORMA-  │→│glm/deep │→│ deepseek-v4-pro   │  │
 │  │json      │  │TION_SCHEMA│  │seek 解析  │  │ + 多模型共识     │  │
 │  └──────────┘  └──────────┘  └──────────┘  └────────┬─────────┘  │
 │                                                     │            │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌───────▼──────────┐  │
 │  │缓存: L1+L2│←│结果解释   │←│SQL 执行   │←│ 安全校验 + 引号   │  │
-│  │ Redis     │  │qwen      │  │只读事务  │  │ 修复 + sqlglot   │  │
+│  │ Redis     │  │glm      │  │只读事务  │  │ 修复 + sqlglot   │  │
 │  └──────────┘  └──────────┘  └──────────┘  └──────────────────┘  │
 │                                                                  │
 └──────────────────────────┬───────────────────────────────────────┘
@@ -291,10 +291,10 @@ print(result["result"])
 
 ```bash
 # 三个任务可分别指定不同模型（默认用同一个）
-AUX_DEFAULT_MODEL=qwen-turbo
-AUX_INTENT_MODEL=qwen-turbo      # 语义解析
-AUX_VALIDATE_MODEL=qwen-turbo    # SQL 验证
-AUX_EXPLAIN_MODEL=qwen-turbo     # 结果解释
+AUX_DEFAULT_MODEL=glm-4.5-air
+AUX_INTENT_MODEL=glm-4.5-air      # 语义解析
+AUX_VALIDATE_MODEL=glm-4.5-air    # SQL 验证
+AUX_EXPLAIN_MODEL=glm-4.5-air     # 结果解释
 ```
 
 ### 术语映射 (`data/term_mappings.json`)
@@ -395,7 +395,7 @@ text2sql-agent/
 
 ### 架构设计
 
-- **为什么用多模型路由而非单一模型？** 降低 API 成本：免费模型 (qwen-turbo) 处理辅助任务，付费模型 (deepseek) 仅用于核心 SQL 生成
+- **为什么用多模型路由而非单一模型？** 降低 API 成本：免费模型 (glm-4.5-air) 处理辅助任务，付费模型 (deepseek) 仅用于核心 SQL 生成
 - **如何处理用户口语与数据库值的差异？** 三层机制：术语映射 → 字段实际值注入 → 语义解析强制匹配
 - **如何保证 SQL 安全？** 多层防线：SELECT 白名单 → 正则关键词过滤 → sqlglot 语法解析 → 引号修复
 
