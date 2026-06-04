@@ -35,3 +35,4 @@ data/connection.json
 
 # Test
 test_*.py
+external_skills/*

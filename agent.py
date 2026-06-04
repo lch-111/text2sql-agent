@@ -693,6 +693,13 @@ class TextToSQLAgent:
             self._enhanced_validator = None
             self._error_recovery = None
 
+        # SQL 优化器（可选）
+        try:
+            from sql_optimizer import SQLOptimizer
+            self.sql_optimizer = SQLOptimizer(enabled=getattr(self.config, 'enable_sql_optimizer', True))
+        except Exception:
+            self.sql_optimizer = None
+
     @property
     def hybrid_retriever(self):
         if not hasattr(self, '_hybrid_retriever') or self._hybrid_retriever is None:
@@ -1150,9 +1157,19 @@ class TextToSQLAgent:
         limit = parsed.get("limit", 50)
         term_hints = self._build_term_hints()
 
+        # 注入匹配的 skill 指令
+        try:
+            from skill_registry import SkillRegistry
+            registry = SkillRegistry()
+            skill_instructions = registry.get_instructions(normalized_q, list(self._load_db_schema().keys()))
+            if skill_instructions:
+                logger.info(f"[Agent] 注入 {skill_instructions.count('技能')} 个 skill 指令")
+        except Exception:
+            skill_instructions = ""
+
         prompt = SQL_FROM_INTENT_PROMPT.format(
             db_type=db_type,
-            schema_str=schema_text,
+            schema_str=schema_text + ("\n\n" + skill_instructions if skill_instructions else ""),
             term_hints=term_hints or "（无）",
             parsed_intent_json=json.dumps(parsed, ensure_ascii=False, indent=2),
             user_question=normalized_q,
@@ -1595,7 +1612,25 @@ class TextToSQLAgent:
             except Exception as e:
                 logger.debug(f"[反思] 执行失败 (非阻塞): {e}")
 
-        # ---- Step 5: 辅助模型生成结果解释 ----
+        # ---- Step 5: SQL 优化分析 ----
+        if result["error"] is None and result.get("sql") and hasattr(self, 'sql_optimizer') and self.sql_optimizer:
+            try:
+                opt = self.sql_optimizer.analyze(result["sql"])
+                if opt["suggestions"] or opt["indexes"]:
+                    result["optimization"] = opt
+            except Exception:
+                pass
+
+        # ---- Step 6: 自动图表生成 ----
+        if result["error"] is None and result["result"]:
+            try:
+                chart_config = self.generate_chart_config(question, pd.DataFrame(result["result"]))
+                if chart_config and chart_config.get("needs_chart"):
+                    result["chart_config"] = chart_config
+            except Exception as e:
+                logger.debug(f"[Agent] 图表自动生成跳过: {e}")
+
+        # ---- Step 7: 辅助模型生成结果解释 ----
         if result["error"] is None and result["result"]:
             try:
                 from utils.model_router import get_router
@@ -1725,6 +1760,28 @@ class TextToSQLAgent:
             except Exception:
                 return f'SELECT * FROM "{first_table}" LIMIT 20'
         return "SELECT 1 AS info"
+
+    def generate_chart_config(self, question: str, df: 'pd.DataFrame') -> Optional[Dict]:
+        """根据查询结果自动生成 ECharts 配置"""
+        if df.empty or len(df.columns) < 2:
+            return {"needs_chart": False}
+        preview = df.head(50).to_string(max_colwidth=30)
+        prompt = f"""根据用户问题 {question} 和数据预览：
+{preview}
+输出 JSON：{{"needs_chart":true/false,"chart_type":"bar|line|pie","config":{{"xAxis":{{"data":[...]}},"series":[{{"data":[...]}}],"title":{{"text":"..."}}}}}}
+只输出 JSON。"""
+        try:
+            from agent import LLMClient
+            client = LLMClient()
+            raw = client.generate(prompt)
+            match = re.search(r'\{.*\}', raw, re.DOTALL)
+            if match:
+                parsed = json.loads(match.group())
+                if parsed.get("needs_chart"):
+                    return parsed
+            return {"needs_chart": False}
+        except Exception:
+            return {"needs_chart": False}
 
     def get_schema_summary(self) -> str:
         """获取数据库结构摘要（给 LLM 查看用）"""

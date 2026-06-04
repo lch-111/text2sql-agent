@@ -110,7 +110,7 @@ class AuxLLMConfig:
     # 默认辅助模型（所有任务回退）
     default_api_key: str = os.getenv("AUX_DEFAULT_API_KEY", "")
     default_base_url: str = os.getenv("AUX_DEFAULT_BASE_URL", "")
-    default_model: str = os.getenv("AUX_DEFAULT_MODEL", "qwen-turbo")
+    default_model: str = os.getenv("AUX_DEFAULT_MODEL", "glm-4.5-air")
 
     # 意图识别专用（中文理解强 → 推荐 GLM-4-Flash 或 qwen-turbo）
     intent_model: str = os.getenv("AUX_INTENT_MODEL", "")
@@ -154,6 +154,8 @@ class AgentConfig:
     enable_few_shot: bool = True
     # 注入到 Prompt 中的 Few-Shot 示例数量
     few_shot_count: int = 3
+    # 是否启用 SQL 优化器
+    enable_sql_optimizer: bool = os.getenv("ENABLE_SQL_OPTIMIZER", "true").lower() == "true"
 
 
 # ============================================================================
