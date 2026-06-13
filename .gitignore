@@ -38,7 +38,7 @@ test_*.py
 external_skills/*
 
 .claude/
-
+.harness/
 .ollama/
 .cache/huggingface/
 .cache/torch/

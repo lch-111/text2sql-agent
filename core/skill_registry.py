@@ -5,7 +5,7 @@ Skill 注册表 — 为 Text-to-SQL Agent 提供插件化能力
 允许从外部 markdown 文件加载技能，动态注入到 SQL 生成 Prompt。
 
 用法:
-  from skill_registry import SkillRegistry
+  from core.skill_registry import SkillRegistry
   registry = SkillRegistry()
   instructions = registry.get_instructions(question, schema)
   # 将 instructions 注入到 SQL 生成 Prompt

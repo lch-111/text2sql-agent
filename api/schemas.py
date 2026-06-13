@@ -12,6 +12,7 @@ from typing import Optional, List, Any, Dict
 class ChatRequest(BaseModel):
     question: str
     history: Optional[List[Dict]] = None
+    conv_id: Optional[str] = None  # 对话 ID（用于对话级记忆隔离）
 
     @field_validator("question")
     @classmethod
@@ -67,6 +68,11 @@ class DbConnectionRequest(BaseModel):
         if v and any(c in v for c in [";", "--", "DROP", "drop"]):
             raise ValueError(f"参数包含危险字符: {v[:20]}")
         return v
+
+
+class ConversationEndRequest(BaseModel):
+    """对话结束请求（触发记忆提升与清理）"""
+    conv_id: str  # 需要结束的对话 ID
 
 
 class DbConnectionTestResult(BaseModel):

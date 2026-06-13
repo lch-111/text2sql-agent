@@ -22,7 +22,7 @@ def _sse(event: str, data: dict) -> str:
 
 
 async def stream_chat(
-    question: str, history: list = None
+    question: str, history: list = None, conv_id: str = ""
 ) -> AsyncGenerator[str, None]:
     loop = asyncio.get_event_loop()
     start_time = time.time()
@@ -67,7 +67,10 @@ async def stream_chat(
         from graph import execute as graph_execute
 
         # run_in_executor 返回 Future，不要用 create_task 包装（否则报 Future pending）
-        graph_future = loop.run_in_executor(None, graph_execute, question)
+        graph_future = loop.run_in_executor(
+            None,
+            lambda: graph_execute(question, conv_id=conv_id),
+        )
 
         # 每 10 秒检查一次完成状态，期间发心跳
         while not graph_future.done():
@@ -92,6 +95,7 @@ async def stream_chat(
                 "cache_hit": False,
                 "execution_time": elapsed,
                 "conversation_history": result.get("conversation_history", []),
+                "conv_id": conv_id,
             })
 
         yield _sse("done", {})

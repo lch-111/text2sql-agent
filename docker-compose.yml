@@ -152,7 +152,7 @@ services:
         condition: service_healthy
     networks:
       - text2sql_net
-    entrypoint: ["/app/entrypoint.sh"]
+    entrypoint: ["/app/scripts/entrypoint.sh"]
 
   # ===========================================================================
   # 后台 Worker（可选）

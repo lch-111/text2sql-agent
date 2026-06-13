@@ -123,7 +123,7 @@ def get_langchain_callbacks():
     自动将链路数据上报到 LangSmith。
 
     用法:
-        from tracing import get_langchain_callbacks
+        from core.tracing import get_langchain_callbacks
         callbacks = get_langchain_callbacks()
         response = llm.invoke(prompt, config={"callbacks": callbacks})
     """

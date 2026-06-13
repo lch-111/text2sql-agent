@@ -317,6 +317,66 @@ function DashboardPanel() {
       variants={panelVariants} initial="hidden" animate="visible"
       style={{ padding: 16, height: '100%', overflow: 'auto', background: isFullscreen ? 'var(--bg-primary)' : undefined }}
     >
+      {/* 多屏标签栏 + 新建大屏 */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+        {dashboards.map((db, i) => (
+          <div key={db.id} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+            <button onClick={() => setActiveIdx(i)}
+              style={{ padding: '4px 10px', fontSize: 13, cursor: 'pointer', borderRadius: 6, border: activeIdx === i ? '2px solid var(--accent)' : '1px solid var(--border-color)', background: activeIdx === i ? 'rgba(138,155,174,0.15)' : 'var(--bg-input)', color: 'var(--text-primary)', fontWeight: activeIdx === i ? 600 : 400 }}>
+              {db.name}
+            </button>
+            {dashboards.length > 1 && activeIdx === i && (
+              <span onClick={() => { if (window.confirm('确定删除此大屏及其所有图表？')) delDashboard(i) }} style={{ cursor: 'pointer', color: '#e74c3c', fontSize: 14, padding: '0 2px' }}>×</span>
+            )}
+          </div>
+        ))}
+        <button onClick={addDashboard} style={{ padding: '4px 8px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px dashed var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>+ 新建大屏</button>
+      </div>
+
+      {/* 标题 */}
+      <div style={{ textAlign: 'center', marginBottom: 8 }}>
+        {renaming ? (
+          <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
+            <input value={renameVal} onChange={e => setRenameVal(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') doRename() }} autoFocus
+              style={{ padding: '4px 10px', fontSize: 18, fontWeight: 600, borderRadius: 6, background: 'var(--bg-input)', border: '1px solid var(--accent)', color: 'var(--text-primary)', outline: 'none', textAlign: 'center', width: 220 }} />
+            <button onClick={doRename} style={{ padding: '4px 10px', fontSize: 12, cursor: 'pointer', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 4 }}>✓</button>
+          </div>
+        ) : (
+          <h2 style={{ fontSize: 20, fontWeight: 700, margin: 0, cursor: 'pointer', color: 'var(--text-primary)', letterSpacing: '-0.02em' }}
+            onClick={() => { setRenameVal(active.name); setRenaming(true) }}>
+            {active.name}
+          </h2>
+        )}
+      </div>
+
+      {/* 统一主题（左上角） */}
+      {items.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>🎨 统一主题:</span>
+          <select value={globalThemeColor ?? ''} onChange={e => {
+            const v = e.target.value === '' ? null : Number(e.target.value)
+            if (globalThemeColor !== null) setPrevGlobalThemeColor(globalThemeColor)
+            setGlobalThemeColor(v)
+          }} style={{ padding: '3px 8px', fontSize: 12, borderRadius: 6, background: 'var(--bg-input)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', outline: 'none' }}>
+            <option value="">——</option>
+            {COLOR_SCHEMES.map((s, i) => (
+              <option key={s.name} value={i}>{s.name}</option>
+            ))}
+          </select>
+          {globalThemeColor !== null && (
+            <>
+              <button onClick={() => {
+                if (items.some(it => it.manualColor !== undefined && it.manualColor !== null)) {
+                  if (!window.confirm('部分图表已单独设置配色，应用全局主题将覆盖它们。确定继续？')) return
+                }
+                applyGlobalTheme()
+              }} style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 6 }}>应用</button>
+              <button onClick={revertGlobalTheme} style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>恢复</button>
+            </>
+          )}
+        </div>
+      )}
+
       {/* 工具栏 */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
         <button onClick={() => { setBuilderVisible(!builderVisible); setMetricVisible(false) }} style={{
@@ -440,29 +500,6 @@ function DashboardPanel() {
           }}>添加指标</button>
           <button onClick={() => { setMetricVisible(false); setMetricForm({ table: '', column: '', aggFunc: 'COUNT', filter: '', title: '' }) }}
             style={{ padding: '6px 16px', fontSize: 12, borderRadius: 6, border: '1px solid var(--border-color)', background: 'var(--bg-input)', color: 'var(--text-muted)', cursor: 'pointer' }}>取消</button>
-        </div>
-      )}
-
-      {/* 全局主题切换 */}
-      {items.length > 0 && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
-          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>🎨 统一主题:</span>
-          <select value={globalThemeColor ?? ''} onChange={e => {
-            const v = e.target.value === '' ? null : Number(e.target.value)
-            if (globalThemeColor !== null) setPrevGlobalThemeColor(globalThemeColor)
-            setGlobalThemeColor(v)
-          }} style={{ padding: '3px 8px', fontSize: 12, borderRadius: 6, background: 'var(--bg-input)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', outline: 'none' }}>
-            <option value="">——</option>
-            {COLOR_SCHEMES.map((s, i) => (
-              <option key={s.name} value={i}>{s.name}</option>
-            ))}
-          </select>
-          {globalThemeColor !== null && (
-            <>
-              <button onClick={applyGlobalTheme} style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 6 }}>保存样式</button>
-              <button onClick={revertGlobalTheme} style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>恢复</button>
-            </>
-          )}
         </div>
       )}
 

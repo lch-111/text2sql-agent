@@ -89,13 +89,18 @@ class AgentState(TypedDict):
     # 额外信息
     messages: List[Dict]  # 节点日志消息
 
+    # 记忆系统（增强）
+    conv_id: str  # 对话 ID（前端传递，用于对话级记忆隔离）
+    memory_context: Dict  # 记忆上下文缓存（减少重复检索）
+
 
 def create_initial_state(
     user_input: str,
     history: list = None,
     conversation_history: list = None,
+    conv_id: str = "",
 ) -> AgentState:
-    """创建初始状态"""
+    """创建初始状态（含记忆系统字段）"""
     return {
         "user_input": user_input,
         "normalized_input": user_input,
@@ -119,6 +124,8 @@ def create_initial_state(
         "execution_time": 0.0,
         "clarification": "",
         "messages": [],
+        "conv_id": conv_id,
+        "memory_context": {},
     }
 
 
@@ -231,10 +238,13 @@ def context_completion_node(state: AgentState) -> Dict:
 
 def save_context_node(state: AgentState) -> Dict:
     """
-    上下文保存节点。
+    上下文保存节点（增强版 — 触发记忆抽取）。
 
-    查询执行成功后，从 SQL 中提取结构化上下文，
-    更新 conversation_history（保留最近 5 轮）。
+    查询执行成功后：
+      1. 从 SQL 中提取结构化上下文（原有）
+      2. 提取成功字段映射并存入 MemoryManager（新增）
+      3. 记录查询偏好（新增）
+      4. 高频规则自动提升为全局知识（新增）
     """
     _, _, _, _, _, conversation_mgr = _create_agents()
 
@@ -244,6 +254,7 @@ def save_context_node(state: AgentState) -> Dict:
         or state.get("user_input", "")
     )
     conv_history = list(state.get("conversation_history", []))
+    conv_id = state.get("conv_id", "")
 
     context = conversation_mgr.extract_context(sql, user_query)
     updated_history = conversation_mgr.update_history(
@@ -252,6 +263,57 @@ def save_context_node(state: AgentState) -> Dict:
         sql=sql,
         context=context,
     )
+
+    # ---- 记忆抽取（隐私安全） ----
+    try:
+        from core.cache import get_cache
+        _cache = get_cache()
+        mm = getattr(_cache, "memory_manager", None)
+        if mm and not state.get("error") and state.get("result"):
+            # 1. 提取字段映射
+            from agents.field_resolver import FieldResolver
+            resolver = FieldResolver(memory_manager=mm)
+            mappings = resolver.extract_mappings(
+                query=user_query,
+                sql=sql,
+                conv_id=conv_id if conv_id else None,
+            )
+            for m in mappings:
+                mm.set_global_mapping(
+                    field=m["field"],
+                    display_value=m["display_value"],
+                    db_value=m["db_value"],
+                )
+                if conv_id:
+                    mm.set_conv_mapping(
+                        conv_id=conv_id,
+                        field=m["field"],
+                        display_value=m["display_value"],
+                        db_value=m["db_value"],
+                    )
+
+            # 2. 记录过滤条件偏好
+            filters = context.get("filters", [])
+            if isinstance(filters, list):
+                for f in filters:
+                    if isinstance(f, dict) and "field" in f and "value" in f:
+                        mm.record_conv_preference(
+                            conv_id=conv_id if conv_id else "_default",
+                            filter_key=str(f["field"]),
+                            filter_value=str(f["value"]),
+                        )
+                        mm.add_global_preference(
+                            filter_key=str(f["field"]),
+                            filter_value=str(f["value"]),
+                        )
+
+            # 3. 对话级 → 全局提升
+            if conv_id:
+                promoted = mm.promote_to_global(conv_id)
+                if promoted > 0:
+                    logger.info(f"[Graph] 记忆提升: {promoted} 条规则从对话提升至全局")
+    except Exception as e:
+        logger.warning(f"[Graph] 记忆抽取异常（非致命）: {e}")
 
     return {
         "conversation_history": updated_history,
@@ -425,6 +487,37 @@ def retrieve_schema_node(state: AgentState) -> Dict:
     }
 
 
+def build_memory_context_node(state: AgentState) -> Dict:
+    """
+    记忆上下文构建节点。
+
+    在 generator 之前执行，检索全局 + 对话级记忆，
+    将字段映射、Trace 提示、偏好提示组装为 memory_context，
+    供 generator_node 注入 Prompt。
+    """
+    from core.cache import get_cache
+
+    try:
+        cache = get_cache()
+        mm = cache.memory_manager
+        conv_id = state.get("conv_id", "")
+
+        ctx = mm.build_memory_context(
+            query=state.get("normalized_input", "") or state.get("user_input", ""),
+            conv_id=conv_id if conv_id else None,
+        )
+        logger.info(
+            f"[Graph] 记忆上下文构建完成: "
+            f"field_hints={bool(ctx['field_hints'])}, "
+            f"trace_hints={bool(ctx['trace_hints'])}, "
+            f"preference_hints={bool(ctx['preference_hints'])}"
+        )
+        return {"memory_context": ctx}
+    except Exception as e:
+        logger.warning(f"[Graph] 记忆上下文构建失败: {e}")
+        return {"memory_context": {}}
+
+
 def generator_node(state: AgentState) -> Dict:
     """
     SQL 生成节点。
@@ -436,9 +529,14 @@ def generator_node(state: AgentState) -> Dict:
     _, _, generator, _, _, _ = _create_agents()
     start = time.time()
 
+    memory_ctx = state.get("memory_context", {})
     result = generator.generate(
         query=state["normalized_input"],
         schema_context=state["schema_context"],
+        resolved_fields=memory_ctx.get("field_hints", ""),
+        resolved_values="",  # 保留为空，由 FieldResolver 填充
+        trace_hints=memory_ctx.get("trace_hints", ""),
+        preference_hints=memory_ctx.get("preference_hints", ""),
     )
     sql = result["sql"] if isinstance(result, dict) else result
     reasoning = result.get("reasoning", "") if isinstance(result, dict) else ""
@@ -446,16 +544,15 @@ def generator_node(state: AgentState) -> Dict:
     duration = time.time() - start
     logger.info(f"[Graph] SQL 生成完成 ({duration:.2f}s)")
 
-    # 组装思维链：路由理由 + SQL 生成推理
+    # 组装思维链：SQL 生成推理（过滤 Router 内部错误信息）
     router_reason = state.get("intent_reason", "")
     thinking_parts = []
-    if router_reason:
+    # 过滤"分类器解析失败"等内部降级消息
+    if router_reason and "分类器" not in router_reason and "降级" not in router_reason:
         thinking_parts.append(f"🔍 意图识别：{router_reason}")
     if reasoning:
-        # 取推理的前 300 字符
-        brief = reasoning[:300]
-        thinking_parts.append(f"💡 分析过程：{brief}")
-    thinking = "\n\n".join(thinking_parts)
+        thinking_parts.append(f"💡 {reasoning}")
+    thinking = "\n\n".join(thinking_parts) if thinking_parts else "已为你生成 SQL"
 
     return {
         "sql": sql,
@@ -544,11 +641,17 @@ def self_correction_node(state: AgentState) -> Dict:
         f"[Graph] 触发自我修正 (第 {state['retries'] + 1} 次)"
     )
 
+    from core.cache import get_cache
+    _cache = get_cache()
+    _mm = getattr(_cache, "memory_manager", None)
+
     corrected_sql = critic.self_correction_loop(
         original_query=state["normalized_input"],
         failed_sql=state["sql"],
         error_message=state["error"],
         schema_context=state["schema_context"],
+        conv_id=state.get("conv_id", ""),
+        memory_manager=_mm,
     )
 
     if corrected_sql:
@@ -679,6 +782,7 @@ def build_graph():
     workflow.add_node("dangerous_reject", dangerous_reject_node)
     workflow.add_node("check_cache", check_cache_node)
     workflow.add_node("retrieve_schema", retrieve_schema_node)
+    workflow.add_node("build_memory_context", build_memory_context_node)
     workflow.add_node("generator", generator_node)
     workflow.add_node("critic", critic_node)
     workflow.add_node("executor", executor_node)
@@ -710,8 +814,9 @@ def build_graph():
         {"hit": "save_context", "miss": "retrieve_schema"},
     )
 
-    # ---- 固定边：Schema 检索 → 生成 ----
-    workflow.add_edge("retrieve_schema", "generator")
+    # ---- 固定边：Schema 检索 → 记忆上下文 → 生成 ----
+    workflow.add_edge("retrieve_schema", "build_memory_context")
+    workflow.add_edge("build_memory_context", "generator")
 
     # ---- 条件边：Critic ----
     workflow.add_conditional_edges(
@@ -806,6 +911,10 @@ def run_simple(state: AgentState) -> Dict[str, Any]:
     schema_result = retrieve_schema_node(state)
     state.update(schema_result)
 
+    # ---- 记忆上下文构建 ----
+    memory_result = build_memory_context_node(state)
+    state.update(memory_result)
+
     # ---- SQL 生成（带自我修正循环） ----
     max_retries = 2
     for attempt in range(max_retries + 1):
@@ -899,9 +1008,10 @@ def execute(
     question: str,
     history: list = None,
     conversation_history: list = None,
+    conv_id: str = "",
 ) -> Dict[str, Any]:
     """
-    统一执行入口。
+    统一执行入口（增强版 — 支持记忆系统）。
 
     优先使用 LangGraph 图编排，不可用时降级到简易模式。
 
@@ -909,6 +1019,7 @@ def execute(
         question: 用户问题
         history: 原始对话历史（前端传入）
         conversation_history: 结构化查询历史（跨轮追问用）
+        conv_id: 对话 ID（用于对话级记忆隔离）
 
     返回:
         结果字典（与原有 get_agent().run() 兼容）
@@ -917,6 +1028,7 @@ def execute(
         user_input=question,
         history=history,
         conversation_history=conversation_history,
+        conv_id=conv_id,
     )
 
     graph = get_graph()

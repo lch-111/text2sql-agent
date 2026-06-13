@@ -33,7 +33,7 @@ import pandas as pd
 
 from core.config import CONFIG
 from core.database import get_db
-from agent import TextToSQLAgent
+from core.agent import TextToSQLAgent
 
 logger = logging.getLogger("evaluator")
 

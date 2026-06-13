@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
 from fastapi.responses import StreamingResponse
 
 from pydantic import BaseModel
-from api.schemas import ChatRequest, DashboardControlRequest, DbConnectionRequest
+from api.schemas import ChatRequest, DashboardControlRequest, DbConnectionRequest, ConversationEndRequest
 from api.dependencies import get_agent, get_db, get_cache
 from api.streaming import stream_chat, _sse
 from core.database import DatabaseManager
@@ -28,9 +28,10 @@ router = APIRouter(prefix="/api")
 
 @router.post("/chat")
 async def chat(body: ChatRequest, agent=Depends(get_agent)):
-    """非流式聊天（一次性返回完整结果）"""
+    """非流式聊天（一次性返回完整结果，支持记忆系统）"""
     try:
-        result = agent.run(body.question)
+        # 通过 agent.run() 执行，传递 conv_id
+        result = agent.run(body.question, conv_id=body.conv_id or "")
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -48,7 +49,7 @@ async def chat_stream(body: ChatRequest):
     4. 异常捕获保证 always send done event
     """
     return StreamingResponse(
-        stream_chat(body.question, body.history),
+        stream_chat(body.question, body.history, conv_id=body.conv_id or ""),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -59,6 +60,35 @@ async def chat_stream(body: ChatRequest):
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+@router.post("/conversation/end")
+async def end_conversation(body: ConversationEndRequest):
+    """
+    结束对话并触发记忆系统操作。
+
+    1. 将对话级高频规则提升为全局知识
+    2. 清除对话级记忆数据
+
+    隐私设计：
+      - 不读取或返回原始对话内容
+      - 只操作抽象映射和修正策略
+    """
+    try:
+        cache = get_cache()
+        mm = getattr(cache, "memory_manager", None)
+        if mm and body.conv_id:
+            promoted = mm.promote_to_global(body.conv_id)
+            mm.clear_conversation(body.conv_id)
+            logger.info(
+                f"[API] 对话结束 [{body.conv_id[:12]}], "
+                f"提升 {promoted} 条规则至全局"
+            )
+            return {"success": True, "promoted": promoted}
+        return {"success": True, "promoted": 0}
+    except Exception as e:
+        logger.warning(f"[API] 对话结束处理异常: {e}")
+        return {"success": False, "error": str(e)}
 
 
 @router.post("/chat/explain-chart")
@@ -130,6 +160,7 @@ async def chart_recommend(body: ChatRequest):
         return {"chartType": "bar", "xAxis": columns[0] if columns else "", "yAxis": columns[1] if len(columns) > 1 else columns[0], "seriesField": "", "stacked": False}
 
     try:
+        # 使用 generator 模型（DeepSeek），图表推荐需要较强推理能力
         client = BaseLLMClient(
             model=CONFIG.llm.generator_model,
             name="chart-recommend",

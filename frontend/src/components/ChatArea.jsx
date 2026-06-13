@@ -110,9 +110,13 @@ function saveToHistory(q, msg, messages) {
       last.resultCount = msg.result?.length || 0
       localStorage.setItem('chat_history', JSON.stringify(history))
     }
-    // 保存完整消息到 chat_messages（覆盖当前对话）
+    // 保存完整消息到 chat_messages（当前会话）和 chat_messages_{id}（历史恢复用）
     if (messages && messages.length > 0) {
       try { localStorage.setItem('chat_messages', JSON.stringify(messages)) } catch {}
+      if (history.length > 0) {
+        const last = history[history.length - 1]
+        try { localStorage.setItem('chat_messages_' + last.id, JSON.stringify(messages)) } catch {}
+      }
     }
     window.dispatchEvent(new Event('chat-history-changed'))
   } catch {}
@@ -177,13 +181,13 @@ export default function ChatArea(props) {
           return idx < loadingSteps.length - 1 ? loadingSteps[idx + 1] : prev
         })
       }, 3000)
-      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: q, history: [] }) })
+      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: q, history: [], conv_id: props.convId || '' }) })
       clearInterval(stepTimer)
       // 如果用户在此期间切换了对话，丢弃此响应
       if (mySession !== sessionIdRef.current) return
       const data = await res.json()
       // LLM 智能推荐初始图表（调用 /api/chart/recommend，失败降级到规则）
-      let recommendedType = 'bar'; let rx, ry
+      let recommendedType = 'bar'; let rx, ry, rSeries, rStacked
       if (data.sql && data.result?.length > 0 && data.columns?.length > 1) {
         try {
           const rows = data.result.slice(0, 3).map(r => data.columns.map(c => r[c]))
@@ -199,9 +203,11 @@ export default function ChatArea(props) {
             recommendedType = rec.chartType
             rx = rec.xAxis
             ry = rec.yAxis
+            rSeries = rec.seriesField
+            rStacked = rec.stacked
           }
         } catch {
-          // LLM 失败，降级到默认规则
+          // LLM 失败，降级到默认规则（仅类型和轴）
           recommendedType = autoDetectChartType(data.columns, data.result)
           const xy = autoDetectXY(data.columns, data.result); rx = xy.xCol; ry = xy.yCol
         }
@@ -219,7 +225,7 @@ export default function ChatArea(props) {
         } catch {}
       }
       const title = smartTitle
-      const msg = { role: 'assistant', content: '', ...data, title, userQuestion: q, thinkingOpen: false, chartType: recommendedType, analysis: null, analysisLoading: false, manualX: rx, manualY: ry, manualColor: 0, chartEditorOpen: false }
+      const msg = { role: 'assistant', content: '', ...data, title, userQuestion: q, thinkingOpen: false, chartType: recommendedType, analysis: null, analysisLoading: false, manualX: rx, manualY: ry, seriesField: rSeries || '', stacked: rStacked || false, manualColor: 0, chartEditorOpen: false }
       if (data.error) {
         // 友好化已知错误
         const err = data.error
@@ -277,6 +283,8 @@ export default function ChatArea(props) {
       chartType: msg.chartType || 'bar',
       xCol: msg.manualX || '',
       yCol: msg.manualY || '',
+      seriesField: msg.seriesField || '',
+      stacked: msg.stacked || false,
       manualColor: msg.manualColor ?? 0,
     }
     // 写入 localStorage，DashboardPanel 挂载时读取（解决标签页切换监听器不存在的问题）
@@ -290,59 +298,32 @@ export default function ChatArea(props) {
   const buildChartOption = (msg) => {
     if (!msg.result || !msg.result.length || !msg.columns?.length) return null
     const cols = msg.columns; const data = msg.result
-    // 使用用户手动选择或系统推荐
-    const xCol = msg.manualX || msg.columns.find(c => typeof data[0]?.[c] !== 'number') || cols[0]
-    const yCol = msg.manualY || cols.find(c => c !== xCol && typeof data[0]?.[c] === 'number') || cols.find(c => c !== xCol) || cols[0]
-    if (!xCol || !yCol) return null
-    const labels = data.map(r => r[xCol])
-    const values = data.map(r => Number(r[yCol]) || 0)
     const colors = COLOR_SCHEMES[msg.manualColor ?? 0]?.colors || COLOR_SCHEMES[0].colors
     const ct = msg.chartType || 'bar'
-    const grid = { left: 55, right: 25, top: 25, bottom: 55 }
-    const axisLabel = { color: '#8892a8', rotate: labels.length > 8 ? 40 : 0 }
-    const base = { tooltip: { trigger: ct === 'pie' ? 'item' : 'axis' }, grid, color: colors }
+    const axisLabel = { color: '#8892a8', rotate: data.length > 8 ? 40 : 0 }
 
-    if (ct === 'pie') {
-      return { ...base, series: [{ type: 'pie', data: labels.map((l, i) => ({ name: l, value: values[i] })), label: { color: '#8892a8' } }] }
-    }
-    if (ct === 'scatter' || ct === 'effectScatter') {
-      return { ...base, xAxis: { type: 'value', name: xCol, axisLabel }, yAxis: { type: 'value', name: yCol, axisLabel }, series: [{ type: ct, data: data.map(r => [Number(r[xCol]) || 0, Number(r[yCol]) || 0]) }] }
-    }
-    if (ct === 'funnel') {
-      return { ...base, series: [{ type: 'funnel', data: labels.map((l, i) => ({ name: l, value: values[i] })) }] }
-    }
-    if (ct === 'radar') {
-      return { ...base, radar: { indicator: labels.map(l => ({ name: l })) }, series: [{ type: 'radar', data: [{ value: values }] }] }
-    }
-    if (ct === 'heatmap') {
-      return { ...base, xAxis: { type: 'category', data: labels, axisLabel }, yAxis: { type: 'category', data: ['value'], axisLabel }, visualMap: { min: Math.min(...values), max: Math.max(...values) }, series: [{ type: 'heatmap', data: labels.map((l, i) => [i, 0, values[i]]) }] }
-    }
-    if (ct === 'treemap') {
-      return { ...base, series: [{ type: 'treemap', data: labels.map((l, i) => ({ name: l, value: values[i] })) }] }
-    }
-    if (ct === 'sunburst') {
-      return { ...base, series: [{ type: 'sunburst', data: labels.map((l, i) => ({ name: l, value: values[i] })) }] }
-    }
-    if (ct === 'boxplot') {
-      return { ...base, xAxis: { type: 'category', data: labels, axisLabel }, yAxis: { type: 'value' }, series: [{ type: 'boxplot', data: [Math.min(...values), values[Math.floor(values.length/4)], values[Math.floor(values.length/2)], values[Math.floor(values.length*3/4)], Math.max(...values)] }] }
-    }
-    if (ct === 'gauge') {
-      return { ...base, series: [{ type: 'gauge', detail: { formatter: '{value}' }, data: [{ value: values[0] || 0, name: xCol }] }] }
-    }
-    if (ct === 'pictorialBar') {
-      return { ...base, xAxis: { type: 'category', data: labels, axisLabel }, yAxis: { type: 'value', axisLabel }, series: [{ type: 'pictorialBar', data: values, symbol: 'circle' }] }
-    }
-    // bar, line, candlestick, sankey, parallel, graph, lines
-    if (ct === 'candlestick') {
-      return { ...base, xAxis: { type: 'category', data: labels, axisLabel }, yAxis: { type: 'value' }, series: [{ type: 'candlestick', data: values.map(v => [v * 0.95, v * 1.1, v * 0.9, v * 1.05]) }] }
-    }
-    // 默认柱/折线
-    return {
-      ...base,
-      xAxis: { type: 'category', data: labels, name: xCol, axisLabel },
-      yAxis: { type: 'value', name: yCol, axisLabel },
-      series: [{ type: ct === 'line' ? 'line' : 'bar', data: values, itemStyle: { color: colors[0] }, smooth: ct === 'line' }],
-    }
+    // 由 LLM /api/chart/recommend 返回的轴配置，用户也可手动修改
+    const xCol = msg.manualX || cols.find(c => typeof data[0]?.[c] !== 'number') || cols[0]
+    const yCol = msg.manualY || cols.find(c => c !== xCol && typeof data[0]?.[c] === 'number') || cols.find(c => c !== xCol) || cols[0]
+
+    if (!xCol || !yCol) return null
+    const labels = data.map(r => String(r[xCol] ?? ''))
+    const base = { tooltip: { trigger: ct === 'pie' ? 'item' : 'axis' }, color: colors }
+
+    // 标准柱/折线
+    const values = data.map(r => Number(r[yCol]) || 0)
+    const grid = { left: 55, right: 25, top: 25, bottom: 55 }
+
+    if (ct === 'pie') return { ...base, series: [{ type: 'pie', data: labels.map((l, i) => ({ name: l, value: values[i] })), label: { color: '#8892a8' } }] }
+    if (ct === 'scatter' || ct === 'effectScatter') return { ...base, xAxis: { type: 'value' }, yAxis: { type: 'value' }, series: [{ type: ct, data: data.map(r => [Number(r[xCol]) || 0, Number(r[yCol]) || 0]) }] }
+    if (ct === 'funnel') return { ...base, series: [{ type: 'funnel', data: labels.map((l, i) => ({ name: l, value: values[i] })) }] }
+    if (ct === 'radar') return { ...base, radar: { indicator: labels.map(l => ({ name: l })) }, series: [{ type: 'radar', data: [{ value: values }] }] }
+    if (ct === 'heatmap') return { ...base, xAxis: { type: 'category', data: labels, axisLabel }, yAxis: { type: 'category', data: ['value'], axisLabel }, visualMap: { min: Math.min(...values), max: Math.max(...values) }, series: [{ type: 'heatmap', data: labels.map((l, i) => [i, 0, values[i]]) }] }
+    if (ct === 'treemap' || ct === 'sunburst') return { ...base, series: [{ type: ct, data: labels.map((l, i) => ({ name: l, value: values[i] })) }] }
+    if (ct === 'gauge') return { ...base, series: [{ type: 'gauge', detail: { formatter: '{value}' }, data: [{ value: values[0] || 0, name: xCol }] }] }
+    if (ct === 'pictorialBar') return { ...base, xAxis: { type: 'category', data: labels, axisLabel }, yAxis: { type: 'value', axisLabel }, series: [{ type: 'pictorialBar', data: values, symbol: 'circle' }] }
+
+    return { ...base, grid, xAxis: { type: 'category', data: labels, name: xCol, axisLabel }, yAxis: { type: 'value', name: yCol, axisLabel }, series: [{ type: ct === 'line' ? 'line' : 'bar', data: values, itemStyle: { color: colors[0] }, smooth: ct === 'line' }] }
   }
 
   return (
@@ -354,7 +335,7 @@ export default function ChatArea(props) {
               {msg.role === 'user' ? '🐱' : '🤖'}
             </div>
 
-            <div style={{ maxWidth: '75%', padding: '10px 14px', borderRadius: 14, fontSize: 13, lineHeight: 1.6, wordBreak: 'break-word', ...(msg.role === 'user' ? { background: 'var(--bg-hover)', color: 'var(--text-primary)', borderBottomRightRadius: 4 } : { background: 'var(--bg-card)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', borderBottomLeftRadius: 4, boxShadow: 'var(--shadow)' }) }}>
+            <div style={{ maxWidth: '80%', minWidth: 200, padding: '10px 14px', borderRadius: 14, fontSize: 13, lineHeight: 1.6, wordBreak: 'break-word', ...(msg.role === 'user' ? { background: 'var(--bg-hover)', color: 'var(--text-primary)', borderBottomRightRadius: 4 } : { background: 'var(--bg-card)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', borderBottomLeftRadius: 4, boxShadow: 'var(--shadow)' }) }}>
               {msg.content}
 
               {/* 思维链 — 有内容时才渲染按钮 */}
@@ -380,8 +361,8 @@ export default function ChatArea(props) {
                   </div>
 
                   {/* 图表（自适应容器） */}
-                  <div style={{ width: '100%', maxHeight: 280, overflow: 'hidden' }}>
-                    {buildChartOption(msg) && <ReactEChartsCore key={msg.chartType + (msg.manualX || '') + (msg.manualY || '') + (msg.manualColor ?? 0)} option={buildChartOption(msg)} style={{ height: 250, width: '100%' }} opts={{ renderer: 'canvas' }} />}
+                  <div style={{ width: '100%', aspectRatio: '16/9', maxHeight: 300 }}>
+                    {buildChartOption(msg) && <ReactEChartsCore key={msg.chartType + (msg.manualX || '') + (msg.manualY || '') + (msg.manualColor ?? 0)} option={buildChartOption(msg)} style={{ height: '100%', width: '100%' }} opts={{ renderer: 'canvas' }} />}
                   </div>
 
                   {/* 操作按钮行 */}

@@ -396,7 +396,7 @@ class TextToSQLAgent:
 
         # LangSmith 追踪（兼容）
         try:
-            from tracing import init_tracing, get_recorder, is_tracing_enabled
+            from core.tracing import init_tracing, get_recorder, is_tracing_enabled
             init_tracing()
             self.trace_recorder = get_recorder() if is_tracing_enabled() else None
         except Exception as e:
@@ -409,9 +409,9 @@ class TextToSQLAgent:
     # 核心方法
     # ========================================================================
 
-    def run(self, question: str, use_cache: bool = True) -> Dict[str, Any]:
+    def run(self, question: str, use_cache: bool = True, conv_id: str = "") -> Dict[str, Any]:
         """
-        执行完整的 Text-to-SQL 链路。
+        执行完整的 Text-to-SQL 链路（支持记忆系统）。
 
         委托给 graph.py 的 LangGraph 状态图编排。
         自动维护多轮对话上下文（conversation_history）。
@@ -419,6 +419,7 @@ class TextToSQLAgent:
         参数:
             question: 用户的自然语言问题
             use_cache: 是否启用缓存（兼容参数）
+            conv_id: 对话 ID（用于对话级记忆隔离）
 
         返回:
             {
@@ -435,12 +436,13 @@ class TextToSQLAgent:
                 "conversation_history": list,  # 多轮对话上下文
             }
         """
-        from graph import execute as graph_execute
+        from core.graph import execute as graph_execute
 
-        # 传入累积的对话历史（支持跨轮追问）
+        # 传入累积的对话历史和 conv_id
         result = graph_execute(
             question=question,
             conversation_history=getattr(self, '_conv_history', []),
+            conv_id=conv_id,
         )
 
         # 更新实例级别的对话历史
@@ -464,7 +466,7 @@ class TextToSQLAgent:
         返回:
             (sql, token_estimate)
         """
-        from graph import execute as graph_execute
+        from core.graph import execute as graph_execute
 
         result = graph_execute(question)
         sql = result.get("sql", "")

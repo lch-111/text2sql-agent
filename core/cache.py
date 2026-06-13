@@ -36,6 +36,7 @@ from collections import Counter
 import pandas as pd
 
 from core.config import CONFIG
+from core.memory_manager import MemoryManager
 
 # 缓存日志记录器
 cache_logger = logging.getLogger("semantic_cache")
@@ -494,6 +495,51 @@ class SemanticCache:
         except Exception as e:
             cache_logger.warning(f"[Schema缓存] 写入失败: {e}")
 
+    # ========================================================================
+    # 全局字段映射（跨对话记忆入口，委托 MemoryManager）
+    # ========================================================================
+
+    def set_global_mapping(self, field: str, display_value: str, db_value: str) -> None:
+        """
+        记录全局字段"口语→数据库值"映射。
+
+        跨对话复用：当用户在多个对话中成功使用相同的字段映射时，
+        自动沉淀为全局知识，后续对话直接命中。
+
+        参数:
+            field: 数据库字段名（如 "status"）
+            display_value: 用户口语化值（如 "已完成"）
+            db_value: 数据库实际值（如 "已完成"）
+        """
+        if hasattr(self, 'memory_manager') and self.memory_manager:
+            self.memory_manager.set_global_mapping(field, display_value, db_value)
+
+    def get_global_mapping(self, field: str, display_value: str):
+        """
+        查询全局字段映射。
+
+        参数:
+            field: 数据库字段名
+            display_value: 用户口语化值
+
+        返回:
+            数据库实际值，不存在返回 None
+        """
+        if hasattr(self, 'memory_manager') and self.memory_manager:
+            return self.memory_manager.get_global_mapping(field, display_value)
+        return None
+
+    def get_all_global_mappings(self) -> list:
+        """
+        获取所有已验证（count >= 2）的全局字段映射。
+
+        返回:
+            [{"field": ..., "display_value": ..., "db_value": ..., "count": ...}, ...]
+        """
+        if hasattr(self, 'memory_manager') and self.memory_manager:
+            return self.memory_manager.get_all_global_mappings()
+        return []
+
 
 # ============================================================================
 # 全局单例
@@ -503,10 +549,12 @@ _cache_instance: Optional[SemanticCache] = None
 
 
 def get_cache() -> SemanticCache:
-    """获取缓存单例"""
+    """获取缓存单例（自动挂载 MemoryManager）"""
     global _cache_instance
     if _cache_instance is None:
         _cache_instance = SemanticCache()
+        # 挂载记忆管理器，复用同一 Redis 连接
+        _cache_instance.memory_manager = MemoryManager(_cache_instance._redis)
     return _cache_instance
 
 

@@ -250,26 +250,68 @@ class CriticAgent:
         failed_sql: str,
         error_message: str,
         schema_context: str,
+        conv_id: Optional[str] = None,
+        memory_manager=None,
     ) -> Optional[str]:
         """
-        Self-Correction 闭环。
+        Self-Correction 闭环（增强版 — 支持记忆检索与存储）。
 
         流程：
-        1. 检索 Trace 中相似错误的历史修正
-        2. 构建增强 Prompt（含历史修正提示）
+        1. 检索全局 Trace + 对话级 Trace 中相似错误的历史修正
+        2. 构建增强 Prompt（含历史修正提示 + 记忆上下文）
         3. 调用 Generator 生成修正 SQL
         4. 重试最多 MAX_RETRY_LIMIT 次
+        5. 修正成功后提取抽象模式存入 MemoryManager
+
+        参数:
+            original_query: 用户原始问题
+            failed_sql: 执行失败的 SQL
+            error_message: 错误信息
+            schema_context: 表结构文本
+            conv_id: 当前对话 ID（可选）
+            memory_manager: MemoryManager 实例（可选）
         """
         current_sql = failed_sql
         current_error = error_message
         retry_count = 0
 
-        logger.info(f"[CriticAgent] 启动 Self-Correction")
+        logger.info(f"[CriticAgent] 启动 Self-Correction (增强记忆模式)")
 
-        # ---- 检索相似 Trace ----
-        trace_hint = self.search_similar_trace(error_message, original_query)
-        if trace_hint:
-            logger.info(f"[CriticAgent] 找到历史 Trace，注入修正 Prompt")
+        # ---- 检索相似 Trace（全局 + 对话级） ----
+        trace_hints = []
+
+        # 全局 Trace 检索
+        if memory_manager:
+            global_traces = memory_manager.search_global_traces(error_message)
+            for t in global_traces:
+                trace_hints.append(
+                    f"[{t.get('error_type', '?')}] {t.get('error_pattern', '')} "
+                    f"→ {t.get('solution', '')}"
+                )
+
+            # 对话级 Trace 检索
+            if conv_id:
+                conv_traces = memory_manager.search_conv_traces(conv_id, error_message)
+                for t in conv_traces:
+                    # 避免与全局重复
+                    pattern = t.get('error_pattern', '')
+                    if not any(pattern in ht for ht in trace_hints):
+                        trace_hints.append(
+                            f"[{t.get('error_type', '?')}] {pattern} "
+                            f"→ {t.get('solution', '')}"
+                        )
+
+        # 也检索 traces/ 目录中的历史 Trace（原有能力保持）
+        file_trace_hint = self.search_similar_trace(error_message, original_query)
+
+        trace_block = ""
+        if trace_hints:
+            trace_block = "【历史修正参考（来自记忆库）】\n" + "\n".join(trace_hints)
+        if file_trace_hint:
+            trace_block = trace_block + "\n" + file_trace_hint if trace_block else file_trace_hint
+
+        if trace_block:
+            logger.info(f"[CriticAgent] 找到 {len(trace_hints)} 条记忆库 Trace + 文件 Trace")
 
         while retry_count < self.max_retries:
             retry_count += 1
@@ -282,7 +324,7 @@ class CriticAgent:
                 failed_sql=current_sql,
                 error_message=current_error,
                 schema_context=schema_context or "（无表结构）",
-                trace_hint=trace_hint or "",
+                trace_hint=trace_block or "",
             )
 
             try:
@@ -340,6 +382,24 @@ class CriticAgent:
                     retry_count=retry_count,
                     final_result=corrected_sql,
                 )
+
+                # ---- 记忆存储：提取抽象模式并存入 MemoryManager ----
+                if memory_manager:
+                    error_type, error_pattern, solution = self._extract_abstract_pattern(
+                        original_query=original_query,
+                        failed_sql=failed_sql,
+                        error_message=error_message,
+                        corrected_sql=corrected_sql,
+                    )
+                    # 存入全局 Trace 库
+                    memory_manager.add_global_trace(error_type, error_pattern, solution)
+                    # 存入对话级 Trace（如果有 conv_id）
+                    if conv_id:
+                        memory_manager.add_conv_trace(conv_id, error_type, error_pattern, solution)
+                    logger.info(
+                        f"[CriticAgent] 抽象模式已存储: [{error_type}] "
+                        f"{error_pattern[:60]}"
+                    )
                 return corrected_sql
 
             except Exception as e:
@@ -355,3 +415,71 @@ class CriticAgent:
             final_result="失败",
         )
         return None
+
+    # ========================================================================
+    # 抽象模式提取 — 隐私安全的错误模式存储
+    # ========================================================================
+
+    @staticmethod
+    def _extract_abstract_pattern(
+        original_query: str,
+        failed_sql: str,
+        error_message: str,
+        corrected_sql: str,
+    ) -> Tuple[str, str, str]:
+        """
+        从一次成功的自我修正中提取抽象的"错误类型→修正方案"模式。
+
+        隐私设计：
+          - 不存储原始用户问题和完整 failed_sql
+          - 只存储错误类型、关键特征（字段名/表名）、泛化修正方案
+          - 具体值被替换为 <column_value> 占位符
+
+        返回:
+            (error_type, error_pattern, solution_abstract)
+        """
+        # ---- 错误类型判定 ----
+        error_lower = error_message.lower()
+        if "unknown column" in error_lower:
+            error_type = "unknown_column"
+        elif "syntax" in error_lower:
+            error_type = "syntax_error"
+        else:
+            error_type = "execution_error"
+
+        # ---- 提取错误模式（关键特征，不包含完整文本） ----
+        error_pattern_parts = []
+
+        # 提取 unknown column 中的字段名
+        col_match = re.search(
+            r"unknown\s+column\s+['`]\s*(\w+)\s*['`]", error_lower
+        )
+        if col_match:
+            error_pattern_parts.append(f"字段名 {col_match.group(1)}")
+
+        # 提取表名
+        table_match = re.search(
+            r"Table\s+['`](\w+)['`]\s+doesn't\s+exist", error_lower, re.IGNORECASE
+        )
+        if table_match:
+            error_pattern_parts.append(f"表 {table_match.group(1)} 不存在")
+
+        # 提取引号中的标识符
+        if not error_pattern_parts:
+            quoted = re.findall(r"['`]\s*(\w+)\s*['`]", error_message)
+            if quoted:
+                error_pattern_parts.append(f"标识符 {'/'.join(quoted[:3])}")
+
+        error_pattern = "; ".join(error_pattern_parts) if error_pattern_parts else error_message[:100]
+
+        # ---- 提取泛化修正方案 ----
+        if corrected_sql and failed_sql:
+            solution = re.sub(
+                r"['\"]\w+['\"]",
+                "<column_value>",
+                corrected_sql[:200],
+            )
+        else:
+            solution = "修正 SQL 语句"
+
+        return error_type, error_pattern, solution
