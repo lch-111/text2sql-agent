@@ -1,31 +1,62 @@
+/* Geist Sans — self-hosted via CDN */
+@font-face {
+  font-family: 'Geist';
+  src: url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/Geist-Regular.woff2') format('woff2');
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Geist';
+  src: url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/Geist-Medium.woff2') format('woff2');
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Geist';
+  src: url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/Geist-SemiBold.woff2') format('woff2');
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Geist';
+  src: url('https://cdn.jsdelivr.net/npm/geist@1.3.1/dist/fonts/geist-sans/Geist-Bold.woff2') format('woff2');
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* ============================================================================
    企业级智能数据分析 Agent — 主样式表
    ============================================================================ */
 
 /* --- CSS 变量（淡蓝白色渐变主题） --- */
 :root {
-    --bg-primary: #f0f7ff;
-    --bg-secondary: #e8f0fe;
-    --bg-card: #ffffff;
-    --bg-input: #f5f9ff;
-    --bg-hover: #eef3fa;
-    --border-color: #d0dce8;
-    --text-primary: #1a2a3a;
-    --text-secondary: #4a5a6a;
-    --text-muted: #7a8a9a;
-    --accent-cat: #4a9eff;
-    --accent-blue: #4a9eff;
-    --accent-pink: #ff6b8a;
-    --accent-green: #2ecc71;
-    --accent-red: #e74c3c;
-    --accent-orange: #f39c12;
-    --accent-purple: #9b59b6;
-    --accent-cyan: #1abc9c;
-    --msg-user-bg: #4a9eff;
-    --msg-assistant-bg: #ffffff;
-    --shadow: 0 2px 12px rgba(74, 144, 226, 0.12);
-    --radius: 8px;
-    --sidebar-width: 260px;
+    --bg-primary: #F5F7F9;
+    --bg-secondary: #EDF0F3;
+    --font-sans: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
+    --bg-card: #FFFFFF;
+    --bg-input: #F0F2F5;
+    --bg-hover: #E8EBEF;
+    --border-color: #D5DCE3;
+    --text-primary: #1E262F;
+    --text-secondary: #546170;
+    --text-muted: #8A9BAE;
+    --accent-cat: #8A9BAE;
+    --accent-blue: #8A9BAE;
+    --accent-pink: #D4A8A0;
+    --accent-green: #A8C5A8;
+    --accent-red: #D4A8A0;
+    --accent-orange: #D4BFA0;
+    --accent-purple: #B0A8D4;
+    --accent-cyan: #A0C5C5;
+    --msg-user-bg: #D5DCE3;
+    --msg-assistant-bg: #FFFFFF;
+    --shadow: 0 1px 3px rgba(138, 155, 174, 0.08), 0 2px 8px rgba(138, 155, 174, 0.06);
+    --radius: 12px;
+    --transition-theme: 0.3s ease;
 }
 
 /* --- Reset & Base --- */
@@ -33,12 +64,16 @@
 
 html, body {
     height: 100%;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
-    background: linear-gradient(135deg, #e8f4f8 0%, #f0f7ff 30%, #e6f0fa 60%, #dce8f5 100%);
-    background-attachment: fixed;
+    font-family: 'Geist', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Noto Sans SC', sans-serif;
+    background: var(--bg-primary);
     color: var(--text-primary);
     font-size: 14px;
     line-height: 1.6;
+    transition: background var(--transition-theme), color var(--transition-theme);
+}
+
+*, *::before, *::after {
+    transition: background-color var(--transition-theme), border-color var(--transition-theme), box-shadow var(--transition-theme);
 }
 
 /* --- App Layout --- */
@@ -55,21 +90,18 @@ html, body {
     align-items: center;
     justify-content: space-between;
     padding: 10px 24px;
-    background: linear-gradient(135deg, #3d8cff 0%, #6eb5ff 50%, #9ac8ff 100%);
+    background: var(--bg-secondary); color: var(--text-primary); border-bottom: 1px solid var(--border-color);
     border-bottom: 1px solid var(--border-color);
     flex-shrink: 0;
 }
 #app-header h1 {
     font-size: 18px;
     font-weight: 600;
-    color: #ffffff;
-    background: none;
-    -webkit-background-clip: unset;
-    -webkit-text-fill-color: #ffffff;
+    color: var(--text-primary);
 }
 #app-header .header-info {
     font-size: 12px;
-    color: rgba(255,255,255,0.85);
+    color: var(--text-muted);
 }
 
 /* --- Layout --- */
@@ -79,22 +111,65 @@ html, body {
     overflow: hidden;
 }
 
-/* --- Sidebar --- */
-#sidebar {
-    width: var(--sidebar-width);
+/* --- Left Sidebar: History --- */
+#history-sidebar {
+    width: 240px;
     background: var(--bg-secondary);
     border-right: 1px solid var(--border-color);
     padding: 16px;
     overflow-y: auto;
     flex-shrink: 0;
 }
-#sidebar h3 {
+#history-sidebar h3 {
     font-size: 13px;
     color: var(--text-secondary);
     margin-bottom: 10px;
-    text-transform: uppercase;
     letter-spacing: 0.5px;
 }
+
+/* --- Right Sidebar: Tools (Collapsible) --- */
+#tools-sidebar {
+    width: 260px;
+    background: var(--bg-secondary);
+    border-left: 1px solid var(--border-color);
+    overflow-y: auto;
+    flex-shrink: 0;
+    transition: width 0.3s ease;
+    position: relative;
+}
+#tools-sidebar.collapsed {
+    width: 0;
+    overflow: hidden;
+    border-left: none;
+}
+#tools-sidebar-content {
+    padding: 16px;
+    width: 260px;
+}
+.collapse-btn {
+    position: absolute;
+    top: 8px;
+    left: -20px;
+    width: 20px;
+    height: 36px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-right: none;
+    border-radius: 4px 0 0 4px;
+    cursor: pointer;
+    font-size: 12px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    padding: 0;
+}
+.collapse-btn:hover {
+    background: var(--bg-input);
+    color: var(--text-primary);
+}
+
 .sidebar-section {
     margin-bottom: 20px;
 }
@@ -321,19 +396,23 @@ html, body {
 }
 
 /* Unified scrollbar for sidebar, monitor, eval */
-#sidebar::-webkit-scrollbar,
+#history-sidebar::-webkit-scrollbar,
+#tools-sidebar::-webkit-scrollbar,
+#tools-sidebar-content::-webkit-scrollbar,
 #tab-monitor::-webkit-scrollbar,
 #tab-eval::-webkit-scrollbar,
 #tab-tables::-webkit-scrollbar {
     width: 4px;
 }
-#sidebar::-webkit-scrollbar-track,
+#history-sidebar::-webkit-scrollbar-track,
+#tools-sidebar::-webkit-scrollbar-track,
 #tab-monitor::-webkit-scrollbar-track,
 #tab-eval::-webkit-scrollbar-track,
 #tab-tables::-webkit-scrollbar-track {
     background: transparent;
 }
-#sidebar::-webkit-scrollbar-thumb,
+#history-sidebar::-webkit-scrollbar-thumb,
+#tools-sidebar::-webkit-scrollbar-thumb,
 #tab-monitor::-webkit-scrollbar-thumb,
 #tab-eval::-webkit-scrollbar-thumb,
 #tab-tables::-webkit-scrollbar-thumb {
@@ -382,22 +461,22 @@ html, body {
 
 .message-content {
     max-width: 75%;
-    padding: 10px 16px;
-    border-radius: 12px;
+    padding: 12px 18px;
+    border-radius: 14px;
     font-size: 14px;
     line-height: 1.6;
     word-wrap: break-word;
 }
 .message.user .message-content {
-    background: linear-gradient(135deg, #4a9eff, #6cb4ff);
-    color: #fff;
+    background: var(--msg-user-bg);
+    color: var(--text-primary);
     border-bottom-right-radius: 4px;
 }
 .message.assistant .message-content {
-    background: #ffffff;
-    border: 1px solid #d0dce8;
+    background: var(--msg-assistant-bg);
+    border: 1px solid var(--border-color);
     border-bottom-left-radius: 4px;
-    box-shadow: 0 1px 4px rgba(74,144,226,0.06);
+    box-shadow: var(--shadow);
 }
 
 .message-content p {
@@ -541,6 +620,7 @@ html, body {
     font-weight: 600;
     color: var(--text-primary);
 }
+#new-chat-btn:active { transform: scale(0.97); }
 #new-chat-btn {
     padding: 4px 14px;
     font-size: 12px;
@@ -1284,7 +1364,99 @@ html, body {
     .eval-metrics { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 768px) {
-    #sidebar { display: none; }
+    #history-sidebar { display: none; }
+    #tools-sidebar { display: none; }
     .kpi-row { grid-template-columns: 1fr; }
     .message-content { max-width: 90%; }
 }
+
+/* Saved conversation list in sidebar */
+.saved-conv-item {
+    display: flex;
+    align-items: center;
+    padding: 6px 8px;
+    cursor: pointer;
+    border-radius: 4px;
+    font-size: 12px;
+    margin-bottom: 2px;
+    transition: background 0.15s;
+}
+.saved-conv-item:hover {
+    background: var(--bg-input);
+}
+.saved-conv-preview {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--text-primary);
+}
+.saved-conv-time {
+    font-size: 10px;
+    color: var(--text-muted);
+    margin-left: 6px;
+    white-space: nowrap;
+}
+.saved-conv-del {
+    display: none;
+    background: none;
+    border: none;
+    color: #e74c3c;
+    cursor: pointer;
+    font-size: 12px;
+    padding: 0 4px;
+    margin-left: 4px;
+}
+.saved-conv-item:hover .saved-conv-del {
+    display: block;
+}
+
+/* ==========================================================================
+/* Sidebar toggle */
+.sidebar-toggle-btn {
+    display: none;
+    background: none;
+    border: none;
+    color: var(--text-primary);
+    font-size: 20px;
+    cursor: pointer;
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+.sidebar-toggle-btn:hover { background: var(--bg-input); }
+@media (max-width: 768px) { .sidebar-toggle-btn { display: block; } }
+
+/* "记住我" checkbox */
+.checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--text-muted);
+    cursor: pointer;
+    margin-top: 4px;
+}
+.checkbox-label input[type="checkbox"] { width: auto; cursor: pointer; }
+
+/* Saved conversation clickable */
+.saved-conv-item.active { background: rgba(74,158,255,0.1); }
+
+
+/* User message avatar on right */
+.message.user { flex-direction: row-reverse; }
+
+
+/* History conversation cards */
+.history-card {
+    padding: 8px 10px; margin-bottom: 4px; border-radius: 8px; cursor: pointer;
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--bg-card); border: 1px solid var(--border-color);
+    transition: all 0.2s; font-size: 13px;
+}
+.history-card:hover { border-color: var(--accent-cat); box-shadow: 0 1px 4px rgba(74,158,255,0.1); }
+.history-card.active { background: rgba(74,158,255,0.08); border-color: var(--accent-cat); }
+.card-preview { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; color: var(--text-primary); }
+.history-card.active .card-preview { color: var(--accent-cat); font-weight: 500; }
+.card-delete { display: none; background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 14px; padding: 0 4px; margin-left: 4px; }
+.history-card:hover .card-delete { display: block; }
+.card-delete:hover { color: #e74c3c; }

@@ -69,7 +69,7 @@ def init_tracing(
 
     # 优先从 config.py 读取
     try:
-        from config import CONFIG
+        from core.config import CONFIG
         cfg = CONFIG.tracing
         env_key = api_key or cfg.api_key or os.getenv("LANGSMITH_API_KEY", "")
         env_project = project_name or cfg.project or os.getenv("LANGSMITH_PROJECT", "text2sql-agent")

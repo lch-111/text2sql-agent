@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Node (如果有)
+node_modules/
+
+# 日志与临时文件
+*.log
+*.tmp
+*.bak
+
+# 二进制 / 媒体
+*.png
+*.jpg
+*.ico
+*.db
+*.sqlite
+
+# 编辑器
+.vscode/
+.idea/
+*.swp
+
+# Docker 忽略
+.dockerignore
+Dockerfile*
+
+# Git
+.git/
+.gitignore
+
+# 敏感配置
+.env
+*.key
+*.pem
+
+# 大文件数据
+data/*.csv
+data/*.xlsx

@@ -4,12 +4,25 @@ Pydantic 模型定义 — API 请求/响应数据结构
 ==============================================================================
 """
 
-from pydantic import BaseModel
+import re
+from pydantic import BaseModel, field_validator
 from typing import Optional, List, Any, Dict
 
 
 class ChatRequest(BaseModel):
     question: str
+    history: Optional[List[Dict]] = None
+
+    @field_validator("question")
+    @classmethod
+    def validate_question(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("问题不能为空")
+        if len(v) > 500:
+            raise ValueError("问题长度不能超过 500 字符")
+        cleaned = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", v)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        return cleaned.strip()
 
 
 class ChatResponse(BaseModel):
@@ -40,22 +53,23 @@ class UploadResponse(BaseModel):
     sheets: Dict[str, Any]
 
 
-# ============================================================================
-# 数据库连接
-# ============================================================================
-
 class DbConnectionRequest(BaseModel):
-    """数据库连接请求"""
-    db_type: str = "mysql"  # mysql | postgres | sqlite
+    db_type: str = "mysql"
     host: Optional[str] = None
     port: Optional[int] = None
     database: Optional[str] = None
     user: Optional[str] = None
     password: str = ""
 
+    @field_validator("host", "database", "user")
+    @classmethod
+    def validate_db_param(cls, v: Optional[str]) -> Optional[str]:
+        if v and any(c in v for c in [";", "--", "DROP", "drop"]):
+            raise ValueError(f"参数包含危险字符: {v[:20]}")
+        return v
+
 
 class DbConnectionTestResult(BaseModel):
-    """数据库连接测试结果"""
     success: bool
     message: str
     version: Optional[str] = None
@@ -63,7 +77,6 @@ class DbConnectionTestResult(BaseModel):
 
 
 class DbConnectionStatus(BaseModel):
-    """当前数据库连接状态"""
     connected: bool
     db_type: str = ""
     host: Optional[str] = None

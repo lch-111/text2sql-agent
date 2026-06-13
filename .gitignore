@@ -36,3 +36,15 @@ data/connection.json
 # Test
 test_*.py
 external_skills/*
+
+.claude/
+
+.ollama/
+.cache/huggingface/
+.cache/torch/
+
+*_ai_output.*
+*.ai.log
+ai_temp/
+
+.continue/

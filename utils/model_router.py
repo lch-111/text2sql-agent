@@ -1,15 +1,18 @@
 """
 ==============================================================================
-模型路由 — 动态分配主模型/辅助模型任务
+模型路由 — 🚨 已废弃，仅保留向后兼容
 ==============================================================================
-设计思路：
-  主模型（DeepSeek-V4-Pro）负责核心 SQL 生成，成本较高。
-  辅助模型（如 qwen-turbo / GLM-4-Flash，免费）负责辅助任务：
-    1. 意图识别与消歧 — 判断问题是否清晰，是否需要反问
-    2. SQL 语法/逻辑验证 — 检查生成的 SQL 是否有明显错误
-    3. 结果自然语言解释 — 将数据表格转为业务可读的文字
+本文件已废弃，新架构使用 agents/ 目录下的专用 Agent 类。
 
-  当主模型调用失败时，可降级使用辅助模型生成 SQL。
+迁移指引：
+  - 意图分类 → agents/router_agent.py
+  - SQL 生成 → agents/generator_agent.py
+  - SQL 校验 → agents/critic_agent.py
+  - Schema 检索 → agents/schema_retriever.py
+
+新架构使用 BaseLLMClient（llm_client.py）统一调用本地 Ollama 模型，
+不再依赖任何云端 API。
+
 ==============================================================================
 """
 
@@ -17,7 +20,7 @@ import json
 import logging
 from typing import Optional, Dict, Any, List, Tuple
 
-from config import CONFIG
+from core.config import CONFIG
 
 logger = logging.getLogger("model_router")
 

@@ -1,22 +1,6 @@
 {
-  "value_mappings": {
-    "province": {
-      "广东省": "广东",
-      "广西壮族自治区": "广西",
-      "北京市": "北京",
-      "上海市": "上海",
-      "重庆市": "重庆"
-    },
-    "order_status": {
-      "已完成订单": "已完成",
-      "已取消订单": "已取消"
-    }
-  },
-  "field_synonyms": {
-    "order_amount": ["销售额", "营收", "流水", "收入"],
-    "order_count": ["订单数", "单量", "订单量"],
-    "province": ["省", "省份", "地区"],
-    "customer_code": ["客户", "客户编号", "顾客"],
-    "product_number": ["商品", "产品", "货号"]
-  }
+  "_deprecated": true,
+  "_message": "已废弃。由 SchemaRetriever.FieldResolver 自动完成字段/值映射。",
+  "value_mappings": {},
+  "field_synonyms": {}
 }

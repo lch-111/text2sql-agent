@@ -15,6 +15,7 @@ langchain>=0.3.0
 langchain-community>=0.3.0
 langchain-openai>=0.2.0
 langchain-ollama>=0.2.0
+langgraph>=0.2.0            # 多 Agent 状态机编排
 
 # --- 全文检索 (BM25) ---
 rank-bm25>=0.2.2
@@ -39,7 +40,8 @@ pyecharts>=2.0.3
 sqlglot>=20.0.0  # SQL 语法解析与校验
 
 # --- 文件处理（PDF / Excel） ---
-PyPDF2>=3.0.0     # PDF 文本提取
+PyPDF2>=3.0.0     # PDF 文本提取（后备）
+pdfplumber>=0.10.0  # PDF 表格提取（优先）
 openpyxl>=3.1.0   # Excel 读写（pandas 引擎）
 
 # --- 评估框架 ---
