@@ -3,10 +3,23 @@ import GridLayout from 'react-grid-layout'
 import 'react-grid-layout/css/styles.css'
 import { motion } from 'framer-motion'
 import ReactEChartsCore from 'echarts-for-react'
+import * as echarts from 'echarts'
 
 const panelVariants = {
   hidden: { opacity: 0, y: 12 },
   visible: { opacity: 1, y: 0, transition: { duration: 0.3 } },
+}
+
+/** HEX 颜色转 RGBA（支持透明度）*/
+function hexToRgba(hex, alpha) {
+  if (!hex || hex === 'transparent' || hex.startsWith('rgba')) return hex
+  const clean = hex.replace('#', '')
+  if (clean.length < 6) return hex
+  const r = parseInt(clean.slice(0, 2), 16)
+  const g = parseInt(clean.slice(2, 4), 16)
+  const b = parseInt(clean.slice(4, 6), 16)
+  if (isNaN(r) || isNaN(g) || isNaN(b)) return hex
+  return `rgba(${r},${g},${b},${alpha})`
 }
 
 export default function TabPanels({ activeTab }) {
@@ -57,6 +70,10 @@ function DashboardPanel() {
     const d = dashboards[activeIdx] || dashboards[0]
     setLayout(d.layout || [])
     setItems(d.items || [])
+    setSavedOpacity(d.opacity ?? 1)
+    setPreviewColor(null)
+    setPreviewOpacity(null)
+    setThemeStack([])
   }, [activeIdx])
 
   // 图表构建器
@@ -70,7 +87,7 @@ function DashboardPanel() {
   useEffect(() => {
     fetch('/api/db/status').then(r => r.json()).then(d => setTables(d.tables || [])).catch(() => {})
 
-    // 读取暂存的待添加项
+    // 读取暂存的待添加项（支持目标大屏）
     try {
       const pending = localStorage.getItem('pending_dashboard_item')
       if (pending) {
@@ -78,26 +95,81 @@ function DashboardPanel() {
         localStorage.removeItem('pending_dashboard_item')
         if (item) {
           const id = 'pending_' + Date.now()
-          const newItems = [...items, { ...item, id, type: 'chart' }]
-          const newLayout = [...layout, { i: id, x: 0, y: 100, w: 6, h: 4 }]
-          setItems(newItems); setLayout(newLayout); syncDashboards(newLayout, newItems)
+          const itemType = item.type || 'chart'
+          const newItem = { ...item, id, type: itemType }
+          const targetName = item.targetDashboard
+          const isMetric = itemType === 'metric'
+          const layoutSize = isMetric ? { w: 3, h: 1 } : { w: 6, h: 4 }
+
+          if (targetName) {
+            // 添加到指定大屏
+            setDashboards(prev => {
+              const next = [...prev]
+              const targetIdx = next.findIndex(d => d.name === targetName)
+              if (targetIdx >= 0) {
+                const target = next[targetIdx]
+                const newItems = [...(target.items || []), newItem]
+                const newLayout = [...(target.layout || []), { i: id, x: 0, y: 100, ...layoutSize }]
+                next[targetIdx] = { ...target, items: newItems, layout: newLayout }
+                localStorage.setItem(DASHBOARDS_KEY, JSON.stringify(next))
+              }
+              return next
+            })
+          } else {
+            const newItems = [...items, newItem]
+            const newLayout = [...layout, { i: id, x: 0, y: 100, ...layoutSize }]
+            setItems(newItems); setLayout(newLayout)
+            setTimeout(() => syncDashboards(newLayout, newItems), 50)
+          }
         }
       }
     } catch {}
   }, [])
 
-  // 监听从 ChatArea 发来的添加到大屏事件
+  // 监听从 ChatArea 发来的添加到大屏事件（支持目标大屏选择）
   useEffect(() => {
     const handler = (e) => {
       const item = e.detail; if (!item) return
       const id = 'custom_' + Date.now()
-      const newItems = [...items, { ...item, id, type: 'chart' }]
-      const newLayout = [...layout, { i: id, x: 0, y: 100, w: 6, h: 4 }]
-      setItems(newItems); setLayout(newLayout); syncDashboards(newLayout, newItems)
+      const itemType = item.type || 'chart'
+      const newItem = { ...item, id, type: itemType }
+      const targetName = item.targetDashboard
+      const isMetric = itemType === 'metric'
+      const layoutSize = isMetric ? { w: 3, h: 1 } : { w: 6, h: 4 }
+
+      if (targetName) {
+        // 添加到指定大屏
+        setDashboards(prev => {
+          const next = [...prev]
+          const targetIdx = next.findIndex(d => d.name === targetName)
+          if (targetIdx >= 0) {
+            const target = next[targetIdx]
+            const newItems = [...(target.items || []), newItem]
+            const newLayout = [...(target.layout || []), { i: id, x: 0, y: 100, ...layoutSize }]
+            next[targetIdx] = { ...target, items: newItems, layout: newLayout }
+            localStorage.setItem(DASHBOARDS_KEY, JSON.stringify(next))
+          }
+          return next
+        })
+      } else {
+        // 无目标时添加到当前大屏
+        const newItems = [...items, newItem]
+        const newLayout = [...layout, { i: id, x: 0, y: 100, ...layoutSize }]
+        setItems(newItems); setLayout(newLayout)
+        // 这里不同步 syncDashboards 因为 setState 是异步的；用 setTimeout
+        setTimeout(() => {
+          setDashboards(prev => {
+            const next = [...prev]
+            next[activeIdx] = { ...next[activeIdx], items: newItems, layout: newLayout }
+            localStorage.setItem(DASHBOARDS_KEY, JSON.stringify(next))
+            return next
+          })
+        }, 50)
+      }
     }
     window.addEventListener('add-to-dashboard', handler)
     return () => window.removeEventListener('add-to-dashboard', handler)
-  }, [items, layout])
+  }, [items, layout, activeIdx])
 
   const onLayoutChange = useCallback((newLayout) => {
     setLayout(newLayout); syncDashboards(newLayout, items)
@@ -157,11 +229,12 @@ function DashboardPanel() {
       const payload = { table: queryTable, x_column: xCol, y_column: yCol, chart_type: chartType, limit: 100 }
       if (aggFunc) payload.aggregation = aggFunc
       const r = await fetch('/api/dashboard/chart-data', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+      const chartDataJson = await r.json()
       const id = 'builder_' + Date.now()
       const chartItem = {
         id,
         title: title || `${table} - ${xCol} × ${yCol}`,
-        chartData: d,
+        chartData: chartDataJson,
         chartType,
         table,
         xCol,
@@ -261,52 +334,143 @@ function DashboardPanel() {
   ]
 
   // 构建图表 ECharts option（支持 18 种类型 + 21 配色 + 横纵轴标签）
-  // 全局主题色（统一切换预览，不保存）
-  const [globalThemeColor, setGlobalThemeColor] = useState(null)
-  const [prevGlobalThemeColor, setPrevGlobalThemeColor] = useState(null)
+  // ---- 统一改色 + 透明度 + 撤销栈 ----
+  const MAX_STACK = 3
+  const [previewColor, setPreviewColor] = useState(null)     // 选择中的配色预览（未保存）
+  const [previewOpacity, setPreviewOpacity] = useState(null) // 选择中的透明度预览（未保存）
+  const [savedOpacity, setSavedOpacity] = useState(() => active.opacity ?? 1) // 已保存的透明度
+  const [themeStack, setThemeStack] = useState([])            // 撤销栈 [{ manualColors: {id: idx}, opacity }]
 
-  const applyGlobalTheme = () => {
-    if (globalThemeColor === null) return
-    setPrevGlobalThemeColor(null)
-    setItems(prev => prev.map(it => ({ ...it, manualColor: globalThemeColor })))
-    setGlobalThemeColor(null)
+  /** 确定：保存当前预览，备份到撤销栈 */
+  const applyTheme = () => {
+    const snapshot = {}
+    items.forEach(it => { snapshot[it.id] = it.manualColor })
+    const newOpacity = previewOpacity ?? savedOpacity
+
+    setThemeStack(prev => {
+      const next = [...prev, { manualColors: snapshot, opacity: savedOpacity }]
+      return next.length > MAX_STACK ? next.slice(-MAX_STACK) : next
+    })
+
+    setItems(prev => prev.map(it => ({
+      ...it,
+      manualColor: previewColor ?? it.manualColor,
+    })))
+    setSavedOpacity(newOpacity)
+    setPreviewColor(null)
+    setPreviewOpacity(null)
+    // 持久化透明度到大屏对象
+    setDashboards(dPrev => {
+      const next = [...dPrev]
+      next[activeIdx] = { ...next[activeIdx], items: items.map(it => ({ ...it, manualColor: previewColor ?? it.manualColor })), layout, opacity: newOpacity }
+      localStorage.setItem(DASHBOARDS_KEY, JSON.stringify(next))
+      return next
+    })
   }
 
-  const revertGlobalTheme = () => {
-    if (prevGlobalThemeColor === null && globalThemeColor !== null) {
-      setPrevGlobalThemeColor(globalThemeColor)
-    }
-    setGlobalThemeColor(prevGlobalThemeColor)
-    setPrevGlobalThemeColor(null)
+  /** 取消：清空预览，回退到已保存状态 */
+  const cancelPreview = () => {
+    setPreviewColor(null)
+    setPreviewOpacity(null)
   }
 
-  const makeChartOption = (item) => {
+  /** 恢复上一步：从撤销栈弹出最近一次 */
+  const undoThemeStep = () => {
+    setThemeStack(prev => {
+      if (prev.length === 0) return prev
+      const next = [...prev]
+      const last = next.pop()
+      // 恢复 manualColor
+      setItems(prevItems => prevItems.map(it => ({
+        ...it,
+        manualColor: last.manualColors[it.id] ?? it.manualColor,
+      })))
+      // 恢复透明度
+      const restoredOpacity = last.opacity !== undefined ? last.opacity : 1
+      setSavedOpacity(restoredOpacity)
+      // 持久化
+      setDashboards(dPrev => {
+        const dNext = [...dPrev]
+        dNext[activeIdx] = {
+          ...dNext[activeIdx],
+          items: items.map(it => ({ ...it, manualColor: last.manualColors[it.id] ?? it.manualColor })),
+          layout,
+          opacity: restoredOpacity,
+        }
+        localStorage.setItem(DASHBOARDS_KEY, JSON.stringify(dNext))
+        return dNext
+      })
+      return next
+    })
+  }
+
+  // 选择配色时立即预览
+  const handleThemeSelect = (value) => {
+    const newColor = value === '' ? null : Number(value)
+    setPreviewColor(newColor)
+  }
+
+  // 响应图表容器 resize
+  const [resizeVer, setResizeVer] = useState(0)
+  const onGridResize = useCallback((_layout, _oldItem, newItem) => {
+    setResizeVer(v => v + 1)
+    setTimeout(() => {
+      const container = document.querySelector(`[data-echart-id="${newItem.i}"]`)
+      if (container) {
+        const canvas = container.querySelector('canvas')
+        if (canvas && canvas.parentElement) {
+          const instance = echarts?.getInstanceByDom(canvas.parentElement)
+          if (instance) instance.resize()
+        }
+      }
+    }, 100)
+  }, [])
+
+  const makeChartOption = (item, heightLevel = 'normal') => {
     const d = item.chartData
     if (!d || !d.labels) return null
-    // 单个图表手动配色优先，无手动配色时使用全局主题
-    const effectiveColor = item.manualColor ?? globalThemeColor ?? 0
+    // 单个图表手动配色优先 → 全局预览配色 → 已保存配色 → 默认
+    const effectiveColor = item.manualColor ?? previewColor ?? 0
     const colors = COLOR_SCHEMES[effectiveColor]?.colors || COLOR_SCHEMES[0].colors
     const ct = item.chartType || 'bar'
     const labels = d.labels
     const values = d.values
     const xName = item.xCol || ''
     const yName = item.yCol || ''
-    const grid = { left: 55, right: 25, top: 25, bottom: 55 }
-    const axisLabel = { color: '#8892a8', rotate: labels.length > 8 ? 40 : 0 }
+
+    // 根据高度级别调整 grid 边距、轴标签旋转、字号
+    let grid, axisLabel, labelSize, nameVisible
+    if (heightLevel === 'compact') {
+      grid = { left: 30, right: 15, top: 15, bottom: 30 }
+      axisLabel = { color: '#8892a8', rotate: 90, fontSize: 10 }
+      labelSize = 10
+      nameVisible = false
+    } else if (heightLevel === 'spacious') {
+      grid = { left: 70, right: 35, top: 35, bottom: 70 }
+      axisLabel = { color: '#8892a8', rotate: labels.length > 12 ? 40 : 0, fontSize: 13 }
+      labelSize = 13
+      nameVisible = true
+    } else {
+      grid = { left: 55, right: 25, top: 25, bottom: 55 }
+      axisLabel = { color: '#8892a8', rotate: labels.length > 8 ? 40 : 0, fontSize: 11 }
+      labelSize = 11
+      nameVisible = true
+    }
+
     const base = { tooltip: { trigger: ct === 'pie' ? 'item' : 'axis' }, grid, color: colors }
 
-    if (ct === 'pie') return { ...base, series: [{ type: 'pie', data: labels.map((l, i) => ({ name: l, value: values[i] })), label: { color: '#8892a8' } }] }
-    if (ct === 'scatter' || ct === 'effectScatter') return { ...base, xAxis: { type: 'value', name: xName, axisLabel }, yAxis: { type: 'value', name: yName, axisLabel }, series: [{ type: ct, data: labels.map((l, i) => [Number(l) || 0, Number(values[i]) || 0]) }] }
-    if (ct === 'funnel') return { ...base, series: [{ type: 'funnel', data: labels.map((l, i) => ({ name: l, value: values[i] })) }] }
+    if (ct === 'pie') return { ...base, series: [{ type: 'pie', data: labels.map((l, i) => ({ name: l, value: values[i] })), label: { color: '#8892a8', fontSize: labelSize } }] }
+    if (ct === 'scatter' || ct === 'effectScatter') return { ...base, xAxis: { type: 'value', name: nameVisible ? xName : '', axisLabel: { color: '#8892a8', fontSize: labelSize } }, yAxis: { type: 'value', name: nameVisible ? yName : '', axisLabel: { color: '#8892a8', fontSize: labelSize } }, series: [{ type: ct, data: labels.map((l, i) => [Number(l) || 0, Number(values[i]) || 0]) }] }
+    if (ct === 'funnel') return { ...base, series: [{ type: 'funnel', data: labels.map((l, i) => ({ name: l, value: values[i] })), label: { fontSize: labelSize } }] }
     if (ct === 'radar') return { ...base, radar: { indicator: labels.map(l => ({ name: l })) }, series: [{ type: 'radar', data: [{ value: values }] }] }
-    if (ct === 'heatmap') return { ...base, xAxis: { type: 'category', data: labels, axisLabel }, yAxis: { type: 'category', data: ['value'], axisLabel }, visualMap: { min: Math.min(...values), max: Math.max(...values) }, series: [{ type: 'heatmap', data: labels.map((l, i) => [i, 0, values[i]]) }] }
-    if (ct === 'treemap' || ct === 'sunburst') return { ...base, series: [{ type: ct, data: labels.map((l, i) => ({ name: l, value: values[i] })) }] }
-    if (ct === 'gauge') return { ...base, series: [{ type: 'gauge', detail: { formatter: '{value}' }, data: [{ value: values[0] || 0, name: xName }] }] }
+    if (ct === 'heatmap') return { ...base, xAxis: { type: 'category', data: labels, axisLabel: { ...axisLabel, rotate: 90 } }, yAxis: { type: 'category', data: ['value'], axisLabel: { color: '#8892a8', fontSize: labelSize } }, visualMap: { min: Math.min(...values), max: Math.max(...values), textStyle: { fontSize: labelSize } }, series: [{ type: 'heatmap', data: labels.map((l, i) => [i, 0, values[i]]) }] }
+    if (ct === 'treemap' || ct === 'sunburst') return { ...base, series: [{ type: ct, data: labels.map((l, i) => ({ name: l, value: values[i] })), label: { fontSize: labelSize } }] }
+    if (ct === 'gauge') return { ...base, series: [{ type: 'gauge', detail: { formatter: '{value}', fontSize: labelSize }, data: [{ value: values[0] || 0, name: nameVisible ? xName : '' }] }] }
     if (ct === 'pictorialBar') return { ...base, xAxis: { type: 'category', data: labels, axisLabel }, yAxis: { type: 'value', axisLabel }, series: [{ type: 'pictorialBar', data: values, symbol: 'circle' }] }
     return {
       ...base,
-      xAxis: { type: 'category', data: labels, name: xName, axisLabel },
-      yAxis: { type: 'value', name: yName, axisLabel },
+      xAxis: { type: 'category', data: labels, name: nameVisible ? xName : '', axisLabel },
+      yAxis: { type: 'value', name: nameVisible ? yName : '', axisLabel },
       series: [{ type: ct === 'line' ? 'line' : 'bar', data: values, itemStyle: { color: colors[0] }, smooth: ct === 'line' }],
     }
   }
@@ -349,30 +513,42 @@ function DashboardPanel() {
         )}
       </div>
 
-      {/* 统一主题（左上角） */}
+      {/* 统一改色 + 容器透明度 + 撤销栈 */}
       {items.length > 0 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>🎨 统一主题:</span>
-          <select value={globalThemeColor ?? ''} onChange={e => {
-            const v = e.target.value === '' ? null : Number(e.target.value)
-            if (globalThemeColor !== null) setPrevGlobalThemeColor(globalThemeColor)
-            setGlobalThemeColor(v)
-          }} style={{ padding: '3px 8px', fontSize: 12, borderRadius: 6, background: 'var(--bg-input)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', outline: 'none' }}>
+          {/* 配色选择 */}
+          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>🎨 统一配色:</span>
+          <select value={previewColor ?? ''} onChange={e => handleThemeSelect(e.target.value)} style={{ padding: '3px 8px', fontSize: 12, borderRadius: 6, background: 'var(--bg-input)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', outline: 'none' }}>
             <option value="">——</option>
             {COLOR_SCHEMES.map((s, i) => (
               <option key={s.name} value={i}>{s.name}</option>
             ))}
           </select>
-          {globalThemeColor !== null && (
-            <>
-              <button onClick={() => {
-                if (items.some(it => it.manualColor !== undefined && it.manualColor !== null)) {
-                  if (!window.confirm('部分图表已单独设置配色，应用全局主题将覆盖它们。确定继续？')) return
-                }
-                applyGlobalTheme()
-              }} style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 6 }}>应用</button>
-              <button onClick={revertGlobalTheme} style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>恢复</button>
-            </>
+
+          {/* 容器透明度滑块 */}
+          <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 4 }}>🔲 透明度:</span>
+          <input type="range" min="0" max="100"
+            value={Math.round((previewOpacity ?? savedOpacity) * 100)}
+            onChange={e => setPreviewOpacity(Number(e.target.value) / 100)}
+            style={{ width: 80, cursor: 'pointer', accentColor: 'var(--accent)' }} />
+          <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 32 }}>{Math.round((previewOpacity ?? savedOpacity) * 100)}%</span>
+
+          {/* 确定 / 取消 / 恢复上一步 */}
+          {(previewColor !== null || previewOpacity !== null) && (
+            <button onClick={applyTheme} style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 6 }}>
+              确定
+            </button>
+          )}
+          {(previewColor !== null || previewOpacity !== null) && (
+            <button onClick={cancelPreview} style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>
+              取消
+            </button>
+          )}
+          {themeStack.length > 0 && previewColor === null && previewOpacity === null && (
+            <button onClick={undoThemeStep} title="从撤销栈恢复上一步配色和透明度设置"
+              style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>
+              ↩ 恢复上一步{themeStack.length > 1 ? `(${themeStack.length})` : ''}
+            </button>
           )}
         </div>
       )}
@@ -522,13 +698,22 @@ function DashboardPanel() {
           rowHeight={60}
           width={containerRef.current?.clientWidth || 1200}
           onLayoutChange={onLayoutChange}
+          onResize={onGridResize}
           draggableHandle=".drag-handle"
           isResizable={true}
+          compactType="vertical"
+          preventCollision={false}
+          autoSize={true}
         >
           {items.map(item => {
+            // 卡片背景透明度
+            const effectiveOpacity = previewOpacity ?? savedOpacity ?? 1
+            const bgCardVar = getComputedStyle(document.documentElement).getPropertyValue('--bg-card').trim()
+            const cardBg = effectiveOpacity < 1 ? hexToRgba(bgCardVar || '#ffffff', effectiveOpacity) : 'var(--bg-card)'
+
             if (item.type === 'metric') {
               return (
-                <div key={item.id} style={{ borderRadius: 12, background: 'var(--bg-card)', border: '1px solid var(--border-color)', padding: 16, display: 'flex', flexDirection: 'column' }}>
+                <div key={item.id} style={{ borderRadius: 12, background: cardBg, border: '1px solid var(--border-color)', padding: 16, display: 'flex', flexDirection: 'column' }}>
                   <div className="drag-handle" style={{ fontSize: 12, color: 'var(--text-muted)', cursor: 'grab', display: 'flex', justifyContent: 'space-between', userSelect: 'none' }}>
                     <span>{item.title}</span>
                     <span onClick={() => removeItem(item.id)} style={{ cursor: 'pointer', color: '#e74c3c' }}>✕</span>
@@ -537,10 +722,17 @@ function DashboardPanel() {
                 </div>
               )
             }
-            const opt = makeChartOption(item)
+
+            // 计算高度级别：从 layout 中取 h 值
+            const itemLayout = layout.find(l => l.i === item.id)
+            const h = itemLayout?.h ?? 4
+            const heightLevel = h <= 2 ? 'compact' : h >= 5 ? 'spacious' : 'normal'
+
+            const opt = makeChartOption(item, heightLevel)
             const isEditorOpen = item.chartEditorOpen
+            const effectiveColor = item.manualColor ?? previewColor ?? 0
             return (
-              <div key={item.id} style={{ borderRadius: 12, background: 'var(--bg-card)', border: '1px solid var(--border-color)', padding: 12, display: 'flex', flexDirection: 'column' }}>
+              <div key={item.id} data-echart-id={item.id} style={{ borderRadius: 12, background: cardBg, border: '1px solid var(--border-color)', padding: 12, display: 'flex', flexDirection: 'column' }}>
                 <div className="drag-handle" style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4, cursor: 'grab', userSelect: 'none', display: 'flex', justifyContent: 'space-between' }}>
                   <span>{item.title}</span>
                   <span onClick={() => removeItem(item.id)} style={{ cursor: 'pointer', color: '#e74c3c' }}>✕</span>
@@ -553,7 +745,7 @@ function DashboardPanel() {
                   </button>
                 </div>
                 {opt
-                  ? <ReactEChartsCore option={opt} style={{ height: 200, width: '100%' }} opts={{ renderer: 'canvas' }} />
+                  ? <ReactEChartsCore key={item.id + '_' + resizeVer} option={opt} style={{ height: 200, width: '100%' }} opts={{ renderer: 'canvas' }} />
                   : item.result
                     ? <div style={{ color: 'var(--text-primary)', fontSize: 18, fontWeight: 500 }}>{JSON.stringify(item.result[0]?.[Object.keys(item.result[0])[1]] ?? item.result[0]?.[Object.keys(item.result[0])[0]] ?? '—')}</div>
                     : <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: 12 }}>加载中...</div>
@@ -570,7 +762,7 @@ function DashboardPanel() {
                     <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 4 }}>
                       {COLOR_SCHEMES.map((s, ci) => (
                         <button key={s.name} onClick={() => setItems(prev => prev.map(it => it.id === item.id ? { ...it, manualColor: ci } : it))}
-                          style={{ width: 22, height: 16, borderRadius: 3, cursor: 'pointer', border: (item.manualColor ?? 0) === ci ? '2px solid var(--accent)' : '1px solid var(--border-color)', background: `linear-gradient(90deg, ${s.colors.slice(0, 4).join(', ')})`, padding: 0 }} title={s.name} />
+                          style={{ width: 22, height: 16, borderRadius: 3, cursor: 'pointer', border: effectiveColor === ci ? '2px solid var(--accent)' : '1px solid var(--border-color)', background: `linear-gradient(90deg, ${s.colors.slice(0, 4).join(', ')})`, padding: 0 }} title={s.name} />
                       ))}
                     </div>
                     <button onClick={() => setItems(prev => prev.map(it => it.id === item.id ? { ...it, chartEditorOpen: false } : it))}

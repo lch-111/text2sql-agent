@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, Depends
 from fastapi.responses import StreamingResponse
 
 from pydantic import BaseModel
-from api.schemas import ChatRequest, DashboardControlRequest, DbConnectionRequest, ConversationEndRequest
+from api.schemas import ChatRequest, DashboardControlRequest, DbConnectionRequest, ConversationEndRequest, DetectTypeRequest, DetectTypeResponse
 from api.dependencies import get_agent, get_db, get_cache
 from api.streaming import stream_chat, _sse
 from core.database import DatabaseManager
@@ -28,10 +28,9 @@ router = APIRouter(prefix="/api")
 
 @router.post("/chat")
 async def chat(body: ChatRequest, agent=Depends(get_agent)):
-    """非流式聊天（一次性返回完整结果，支持记忆系统）"""
+    """非流式聊天（一次性返回完整结果，支持记忆系统 + 思考模式）"""
     try:
-        # 通过 agent.run() 执行，传递 conv_id
-        result = agent.run(body.question, conv_id=body.conv_id or "")
+        result = agent.run(body.question, conv_id=body.conv_id or "", thinking_mode=body.thinking_mode or "normal")
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -49,7 +48,7 @@ async def chat_stream(body: ChatRequest):
     4. 异常捕获保证 always send done event
     """
     return StreamingResponse(
-        stream_chat(body.question, body.history, conv_id=body.conv_id or ""),
+        stream_chat(body.question, body.history, conv_id=body.conv_id or "", thinking_mode=body.thinking_mode or "normal"),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -534,6 +533,38 @@ async def get_chart_data(body: ChartDataRequest, db=Depends(get_db)):
 
 
 # ============================================================================
+# 大屏添加类型检测
+# ============================================================================
+
+@router.post("/dashboard/detect-type", response_model=DetectTypeResponse)
+async def detect_dashboard_type(body: DetectTypeRequest):
+    """
+    基于 SQL 语义自动识别大屏添加类型（指标/图表）。
+
+    使用 sqlglot 解析 SQL，判断 SELECT 子句中是否全部为聚合函数且无 GROUP BY，
+    若是则视为指标（metric），否则视为图表（chart）。
+    sqlglot 解析失败时，降级为结果形状判断。
+    """
+    try:
+        from services.sql_analyzer import combined_analysis
+
+        result = combined_analysis(body.sql, body.result)
+        return DetectTypeResponse(
+            type=result["type"],
+            reason=result["reason"],
+            method=result["method"],
+        )
+    except Exception as e:
+        logger.warning(f"[识别类型] 检测失败: {e}")
+        # 异常时默认返回图表
+        return DetectTypeResponse(
+            type="chart",
+            reason="类型检测异常，默认按图表展示",
+            method="result_shape",
+        )
+
+
+# ============================================================================
 # 文件上传
 # ============================================================================
 
@@ -827,12 +858,17 @@ async def get_db_status(db=Depends(get_db)):
 
 
 @router.get("/db/suggest-questions")
-async def suggest_questions():
+async def suggest_questions(refresh: int = 0):
     """
-    根据当前数据库表结构，优先通过 LLM 推荐 3 个自然语言问题。
+    根据当前数据库表结构，优先通过 LLM 推荐 3 个自然语言问题，
+    并返回每个问题涉及的"口语词→真实列名"映射，写入全局 KV 缓存。
 
     前端 Chat 和连接数据库后调用，展示为快捷问题按钮。
     基于真实 Schema 的字段名和注释生成，不使用预设示例。
+
+    参数:
+      refresh: 传任意非零值（如时间戳）时使用不同的随机种子，
+               让 LLM 生成与前次不同的推荐问题（"换一批"功能）。
     """
     from core.database import get_db
     from core.config import CONFIG
@@ -843,10 +879,14 @@ async def suggest_questions():
     except Exception:
         table_info = []
 
+    # Schema 为空时不生成问题
     if not table_info:
-        return {"questions": []}
+        return {"questions": [], "field_mappings": {}}
 
-    # 优先使用 LLM 生成
+    questions = []
+    field_mappings = {}
+
+    # 优先使用 LLM 生成（返回问题和字段映射）
     if CONFIG.llm.openai_api_key:
         try:
             from core.llm_client import BaseLLMClient
@@ -861,40 +901,100 @@ async def suggest_questions():
                 parts.append(f"表 {t['table_name']}({t.get('row_count', 0)}行): " + ", ".join(cols))
             schema_text = "\n".join(parts)
 
+            # refresh > 0 时加入随机性提示
+            refresh_hint = ""
+            if refresh:
+                import random
+                seed = refresh % 10000
+                random.seed(seed)
+                scenarios = [
+                    "从销售分析角度",
+                    "从用户行为分析角度",
+                    "从商品运营角度",
+                    "从财务分析角度",
+                    "从库存管理角度",
+                    "从市场营销角度",
+                    "从客户服务角度",
+                    "从供应链分析角度",
+                    "从业绩增长角度",
+                    "从数据质量检查角度",
+                ]
+                chosen = scenarios[seed % len(scenarios)]
+                refresh_hint = f"请{chosen}，生成与前次不同的新问题。"
+
             result = client.generate_json(
                 "根据以下数据库表结构，推荐 3 个用户最可能问的自然语言数据分析问题。"
                 "要求：问题贴合实际业务场景，覆盖不同表。"
-                "只返回 JSON 数组格式如 [\"问题1\", \"问题2\", \"问题3\"]，不要其他内容。\n\n"
+                f"{refresh_hint}"
+                "返回 JSON 对象：\n"
+                '{"questions": ["问题1", "问题2", "问题3"],\n'
+                ' "field_mappings": {"口语词1": "表名.列名", "口语词2": "表名.列名", ...}}\n'
+                "其中 field_mappings 的键是问题中用户可能说的口语化字段名，值是对应的\"表名.列名\"。\n"
+                "每个口语词映射到其最相关的数据库列。\n"
+                "仅返回 JSON，不要其他内容。\n\n"
                 f"数据库表结构：\n{schema_text}",
                 system_prompt="你是一名资深数据分析师。",
             )
-            if result and isinstance(result, list) and len(result) >= 3:
-                return {"questions": result[:3]}
+            if result and isinstance(result, dict):
+                qs = result.get("questions", [])
+                if isinstance(qs, list) and len(qs) >= 3:
+                    questions = qs[:3]
+                fm = result.get("field_mappings", {})
+                if isinstance(fm, dict) and fm:
+                    field_mappings = fm
+            elif result and isinstance(result, list) and len(result) >= 3:
+                # 兼容旧格式：纯数组
+                questions = result[:3]
         except Exception:
             pass
 
-    # LLM 不可用时基于 schema 实际字段名生成
-    questions = []
-    for t in table_info[:5]:
-        tbl = t["table_name"]
-        cols = [c["name"] for c in t["columns"]]
-        if len(questions) >= 3:
-            break
-        # 找第一个字符串列 + 数值列组合 -> 统计类问题
-        str_col = next((c for c in cols if any(k in c.lower() for k in ('name', 'type', 'city', 'province', 'category', 'status', 'gender'))), cols[0] if cols else None)
-        num_col = next((c for c in cols if any(k in c.lower() for k in ('amount', 'price', 'count', 'sales', 'revenue', 'age', 'score'))), None)
-        if str_col and num_col:
-            questions.append(f"按{tbl}的{str_col}统计{num_col}")
-        elif str_col:
-            questions.append(f"查看{tbl}的{str_col}分布")
-        elif num_col:
-            questions.append(f"分析{tbl}的{num_col}趋势")
-        else:
-            questions.append(f"浏览{tbl}的全部数据（{t.get('row_count', 0)} 条）")
-    while len(questions) < 3:
-        questions.append("查看所有表的记录数")
+    # LLM 不可用时基于 schema 实际字段名生成（同时提取映射）
+    if not questions:
+        import random as _rand
+        table_pool = list(table_info[:5])
+        if refresh:
+            _rand.seed(refresh % 10000)
+            _rand.shuffle(table_pool)
 
-    return {"questions": questions[:3]}
+        for t in table_pool:
+            tbl = t["table_name"]
+            cols = [c["name"] for c in t["columns"]]
+            if refresh:
+                _rand.shuffle(cols)
+            if len(questions) >= 3:
+                break
+            str_col = next((c for c in cols if any(k in c.lower() for k in ('name', 'type', 'city', 'province', 'category', 'status', 'gender'))), cols[0] if cols else None)
+            num_col = next((c for c in cols if any(k in c.lower() for k in ('amount', 'price', 'count', 'sales', 'revenue', 'age', 'score'))), None)
+            if str_col and num_col:
+                questions.append(f"按{tbl}的{str_col}统计{num_col}")
+                # 从模板中提取映射：口语词取列名的中文注释或列名本身
+                field_mappings[f"{tbl}的{str_col}"] = f"{tbl}.{str_col}"
+                field_mappings[num_col] = f"{tbl}.{num_col}"
+            elif str_col:
+                questions.append(f"查看{tbl}的{str_col}分布")
+                field_mappings[str_col] = f"{tbl}.{str_col}"
+            elif num_col:
+                questions.append(f"分析{tbl}的{num_col}趋势")
+                field_mappings[num_col] = f"{tbl}.{num_col}"
+            else:
+                questions.append(f"浏览{tbl}的全部数据（{t.get('row_count', 0)} 条）")
+        while len(questions) < 3:
+            questions.append("查看所有表的记录数")
+
+    # 将"口语词→真实列名"映射写入全局 KV 缓存，使后续提问直接命中
+    if field_mappings:
+        try:
+            from agents.schema_retriever import _field_cache, _cache_key
+            for spoken_term, table_column in field_mappings.items():
+                if "." not in table_column:
+                    continue
+                table_name, column_name = table_column.split(".", 1)
+                key = _cache_key("field", table_name, spoken_term)
+                _field_cache[key] = column_name
+        except Exception:
+            pass  # 降级：不写缓存，不影响问题生成
+
+    return {"questions": questions[:3], "field_mappings": field_mappings}
 
 
 @router.post("/db/reset")

@@ -1,5 +1,6 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import ReactEChartsCore from 'echarts-for-react'
+import ChatMascot from './ChatMascot'
 
 /* ==========================================================================
    图表工具函数
@@ -90,33 +91,78 @@ function textSimilarity(a, b) {
   return matches / shorter.length
 }
 
-function loadMessages() {
-  try { const saved = localStorage.getItem('chat_messages'); if (saved) return JSON.parse(saved) } catch {}
+function loadMessages(convId) {
+  // 优先加载当前对话的独立消息存档，降级到通用 chat_messages
+  const key = convId ? 'chat_messages_' + convId : 'chat_messages'
+  try {
+    const saved = localStorage.getItem(key)
+    if (saved) return JSON.parse(saved)
+    // 降级：如果是通用键但没有 convId，尝试有 convId 的存档
+    if (!convId) {
+      const history = JSON.parse(localStorage.getItem('chat_history') || '[]')
+      if (history.length > 0) {
+        const last = history[history.length - 1]
+        const fallback = localStorage.getItem('chat_messages_' + last.id)
+        if (fallback) return JSON.parse(fallback)
+      }
+    }
+  } catch {}
   return [{ role: 'assistant', content: '你好！我是你的数据分析助手。请输入自然语言问题，我会帮你生成 SQL 并查询数据。' }]
 }
 
-function saveToHistory(q, msg, messages) {
+function saveToHistory(q, msg, messages, convId) {
   try {
-    // 更新已有历史条目的摘要，不创建新条目（仅由"新建对话"创建）
     const history = JSON.parse(localStorage.getItem('chat_history') || '[]')
     const title = shortTitle(q)
-    // 只更新最后一条（当前对话）的摘要
-    if (history.length > 0) {
+
+    // ---- 历史去重 ----
+    // 检查最后 5 条历史中是否有相似问题
+    const recent = history.slice(-5)
+    let deduped = false
+    for (const entry of recent) {
+      if (!entry.question) continue
+      const sim = textSimilarity(q, entry.question)
+      if (sim > 0.85) {
+        // 相似问题：保留结果更好（有数据 > 行数多 > 耗时近）的条目
+        const currentRows = msg.result?.length || 0
+        const existingRows = entry.resultCount || 0
+        if (currentRows >= existingRows && msg.sql) {
+          // 当前结果更好，更新条目
+          entry.question = q
+          entry.preview = title
+          entry.sql = msg.sql || ''
+          entry.resultSummary = msg.result ? msg.result.length + ' 条结果' : ''
+          entry.resultCount = currentRows
+        }
+        // 保留更优结果后标记已去重
+        deduped = true
+        break
+      }
+    }
+
+    // 只在非去重时才更新最后一条
+    if (!deduped && history.length > 0) {
       const last = history[history.length - 1]
       last.question = q
       last.preview = title
       last.sql = msg.sql || ''
       last.resultSummary = msg.result ? msg.result.length + ' 条结果' : ''
       last.resultCount = msg.result?.length || 0
+    }
+    if (!deduped) {
       localStorage.setItem('chat_history', JSON.stringify(history))
     }
-    // 保存完整消息到 chat_messages（当前会话）和 chat_messages_{id}（历史恢复用）
+
+    // 保存完整消息到 chat_messages_{convId}（会话隔离）
     if (messages && messages.length > 0) {
-      try { localStorage.setItem('chat_messages', JSON.stringify(messages)) } catch {}
-      if (history.length > 0) {
+      if (convId) {
+        try { localStorage.setItem('chat_messages_' + convId, JSON.stringify(messages)) } catch {}
+      } else if (history.length > 0) {
         const last = history[history.length - 1]
         try { localStorage.setItem('chat_messages_' + last.id, JSON.stringify(messages)) } catch {}
       }
+      // 同时保存到通用键作为降级
+      try { localStorage.setItem('chat_messages', JSON.stringify(messages)) } catch {}
     }
     window.dispatchEvent(new Event('chat-history-changed'))
   } catch {}
@@ -134,18 +180,58 @@ let _globalSessionId = 0
 
 export default function ChatArea(props) {
   const [input, setInput] = useState('')
-  const [messages, setMessages] = useState(loadMessages)
+  // ---- 消息状态改为 conversations 映射（按对话 ID 隔离）----
+  const [conversations, setConversations] = useState(() => {
+    const initId = props.convId
+    const saved = loadMessages(initId)
+    return { [initId]: saved }
+  })
+  // 当前 UI 显示的对话 ID
+  const [activeConvId, setActiveConvId] = useState(props.convId)
+  // 当前正在 SSE 流式输出的对话 ID（ref，不触发渲染）
+  const streamingConvIdRef = useRef(null)
+  const sessionIdRef = useRef(0)
   const [suggestions, setSuggestions] = useState([])
   const [loading, setLoading] = useState(false)
   const [loadingStep, setLoadingStep] = useState('')
   const [restoreLoading, setRestoreLoading] = useState(false)
   const [editingIdx, setEditingIdx] = useState(null)
-  const [confirmModal, setConfirmModal] = useState(null) // { msg, i } 添加到大屏确认弹窗
-  const sessionIdRef = useRef(0)
+  const [confirmModal, setConfirmModal] = useState(null) // { msg, i, targetDashboard? } 添加到大屏确认弹窗
+  const [dashboardList, setDashboardList] = useState([])
+  const [selectedDashboard, setSelectedDashboard] = useState('')
+  const [detectedType, setDetectedType] = useState('chart') // 'metric' | 'chart' 自动检测结果
+  const [detectingType, setDetectingType] = useState(false) // 是否正在检测中
+  const [manualType, setManualType] = useState(null) // null=使用自动检测, 'metric'|'chart'=手动覆盖
+  const [thinkingMode, setThinkingMode] = useState(() => {
+    try { return localStorage.getItem('thinking_mode') || 'normal' } catch { return 'normal' }
+  })
+  const [mascotStatus, setMascotStatus] = useState('idle') // 'idle' | 'thinking'
+  const chatAreaRef = useRef(null)
+  const loadingBubbleRef = useRef(null)
   const loadingSteps = ['🔄 分析查询意图...', '📋 检索数据库结构...', '📝 生成 SQL...', '⚡ 执行查询...']
+
+  // 持久化思考模式偏好
+  useEffect(() => {
+    try { localStorage.setItem('thinking_mode', thinkingMode) } catch {}
+  }, [thinkingMode])
+
+  // 加载大屏列表（从 dashboard_manager localStorage）
+  useEffect(() => {
+    try {
+      const mgr = JSON.parse(localStorage.getItem('dashboard_manager') || '{}')
+      const screens = Object.keys(mgr).filter(k => k !== 'current')
+      setDashboardList(screens)
+      if (screens.length > 0) setSelectedDashboard(screens[0])
+    } catch {}
+  }, [])
   const msgEndRef = useRef(null)
 
-  useEffect(() => { try { localStorage.setItem('chat_messages', JSON.stringify(messages)) } catch {} }, [messages])
+  // 持久化所有对话消息到 localStorage（每个对话独立键名）
+  useEffect(() => {
+    Object.entries(conversations).forEach(([cid, msgs]) => {
+      try { localStorage.setItem('chat_messages_' + cid, JSON.stringify(msgs)) } catch {}
+    })
+  }, [conversations])
 
   useEffect(() => {
     let c = false
@@ -153,39 +239,177 @@ export default function ChatArea(props) {
     return () => { c = true }
   }, [])
 
+  const refreshSuggestions = async () => {
+    try {
+      const r = await fetch('/api/db/suggest-questions?refresh=' + Date.now())
+      const d = await r.json()
+      if (d.questions?.length) setSuggestions(d.questions)
+    } catch {}
+  }
+
+  // ---- 对话切换（来自历史侧栏） + 新建对话 ----
   useEffect(() => {
-    const h1 = (e) => { if (e.detail?.question) setInput(e.detail.question) }
-    const h2 = (e) => { if (e.detail?.messages) setMessages(e.detail.messages) }
-    const h3 = (e) => { setRestoreLoading(e.detail?.loading ?? false) }
-    window.addEventListener('restore-conversation', h1); window.addEventListener('restore-messages', h2); window.addEventListener('restore-loading', h3)
-    return () => { window.removeEventListener('restore-conversation', h1); window.removeEventListener('restore-messages', h2); window.removeEventListener('restore-loading', h3) }
+    const onSwitchConv = (e) => {
+      const { convId, question, messages: msgs } = e.detail || {}
+      if (!convId) return
+      setConversations(prev => {
+        if (prev[convId]) return prev // 已加载
+        return { ...prev, [convId]: msgs || [] }
+      })
+      setActiveConvId(convId)
+      if (question) setInput(question)
+    }
+    const onNewChat = (e) => {
+      const cid = e.detail?.convId
+      if (!cid) return
+      setConversations(prev => {
+        if (prev[cid]) return prev
+        return { ...prev, [cid]: [{ role: 'assistant', content: '你好！我是你的数据分析助手。请输入自然语言问题，我会帮你生成 SQL 并查询数据。' }] }
+      })
+      setActiveConvId(cid)
+      setInput('')
+    }
+    const onRestoreLoading = (e) => { setRestoreLoading(e.detail?.loading ?? false) }
+
+    window.addEventListener('switch-conversation', onSwitchConv)
+    window.addEventListener('new-chat', onNewChat)
+    window.addEventListener('restore-loading', onRestoreLoading)
+    return () => {
+      window.removeEventListener('switch-conversation', onSwitchConv)
+      window.removeEventListener('new-chat', onNewChat)
+      window.removeEventListener('restore-loading', onRestoreLoading)
+    }
   }, [])
 
-  useEffect(() => { msgEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [messages])
-
-  // 广播当前对话 ID 给侧栏用于高亮（从 chatKey prop 获取）
+  // 确认弹窗打开时，自动调用后端检测类型（指标/图表）
   useEffect(() => {
-    window.dispatchEvent(new CustomEvent('conv-active', { detail: { id: props.convId || null } }))
+    if (!confirmModal) return
+    const msg = confirmModal.msg
+    setDetectingType(true)
+    setManualType(null)
+    setDetectedType('chart')
+
+    if (!msg.sql) {
+      // 无 SQL 时降级为结果形状判断
+      const fallback = (!msg.result || msg.result.length === 0) ? 'chart' :
+        (msg.result.length === 1 && Object.keys(msg.result[0]).length === 1) ? 'metric' : 'chart'
+      setDetectedType(fallback)
+      setDetectingType(false)
+      return
+    }
+
+    fetch('/api/dashboard/detect-type', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sql: msg.sql, result: msg.result }),
+    })
+      .then(r => r.json())
+      .then(d => {
+        setDetectedType(d.type || 'chart')
+        setDetectingType(false)
+      })
+      .catch(() => {
+        // 网络异常时降级为结果形状判断
+        const fallback = (!msg.result || msg.result.length === 0) ? 'chart' :
+          (msg.result.length === 1 && Object.keys(msg.result[0]).length === 1) ? 'metric' : 'chart'
+        setDetectedType(fallback)
+        setDetectingType(false)
+      })
+  }, [confirmModal])
+
+  useEffect(() => { msgEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [conversations, activeConvId])
+
+  // ---- 小猫公仔位置计算 ----
+  // idle 时固定在输入区右上，thinking 时定位到最新 AI 气泡上方
+  const [mascotPos, setMascotPos] = useState({ top: 'auto', left: 'auto', right: 28, bottom: 76 })
+  useEffect(() => {
+    if (mascotStatus === 'thinking' && loadingBubbleRef.current && chatAreaRef.current) {
+      const bubbleEl = loadingBubbleRef.current
+      const chatEl = chatAreaRef.current
+      const chatRect = chatEl.getBoundingClientRect()
+      const bubbleRect = bubbleEl.getBoundingClientRect()
+      setMascotPos({
+        top: bubbleRect.top - chatRect.top - 50,
+        left: Math.max(40, bubbleRect.left - chatRect.left + 20),
+        right: 'auto',
+        bottom: 'auto',
+      })
+    } else if (mascotStatus === 'idle') {
+      setMascotPos({ top: 'auto', left: 'auto', right: 28, bottom: 76 })
+    }
+  }, [mascotStatus, loading])
+
+  // 广播当前活跃对话 ID 给侧栏用于高亮
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('conv-active', { detail: { id: activeConvId || null } }))
   })
 
   const handleSend = async () => {
     if (!input.trim() || loading) return
     const q = input.trim(); setInput('')
-    const mySession = ++sessionIdRef.current
-    setMessages(prev => [...prev, { role: 'user', content: q }]); setLoading(true); setLoadingStep('🔄 分析查询意图...')
-    let stepTimer = null
+    const cid = activeConvId // 当前对话 ID，SSE 流全程绑定此值
+    streamingConvIdRef.current = cid
+
+    // 追加用户消息到 conversations[cid]
+    setConversations(prev => ({
+      ...prev,
+      [cid]: [...(prev[cid] || []), { role: 'user', content: q }]
+    }))
+    setLoading(true); setLoadingStep('🔄 分析查询意图...')
+    setMascotStatus('thinking')
+
     try {
-      stepTimer = setInterval(() => {
-        setLoadingStep(prev => {
-          const idx = loadingSteps.indexOf(prev)
-          return idx < loadingSteps.length - 1 ? loadingSteps[idx + 1] : prev
-        })
-      }, 3000)
-      const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: q, history: [], conv_id: props.convId || '' }) })
-      clearInterval(stepTimer)
-      // 如果用户在此期间切换了对话，丢弃此响应
-      if (mySession !== sessionIdRef.current) return
-      const data = await res.json()
+      // 使用 SSE 流式端点（实时进度更新）
+      const res = await fetch('/api/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ question: q, history: [], conv_id: cid, thinking_mode: thinkingMode }),
+      })
+      const reader = res.body?.getReader()
+      if (!reader) throw new Error('无法读取响应流')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let resultData = null
+      let sqlText = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        // 解析 SSE 事件
+        const parts = buffer.split('\n\n')
+        buffer = parts.pop() || ''
+        for (const block of parts) {
+          const lines = block.split('\n')
+          let eventType = '', dataStr = ''
+          for (const l of lines) {
+            if (l.startsWith('event: ')) eventType = l.slice(7)
+            if (l.startsWith('data: ')) dataStr = l.slice(6)
+          }
+          if (!dataStr) continue
+          try {
+            const d = JSON.parse(dataStr)
+            // ---- 关键修复：校验 cid 是否匹配当前流 ----
+            if (d.cid && d.cid !== streamingConvIdRef.current) continue
+
+            if (eventType === 'step') {
+              setLoadingStep(d.message || '处理中...')
+            } else if (eventType === 'sql') {
+              sqlText = d.sql || ''
+            } else if (eventType === 'result') {
+              resultData = d
+            } else if (eventType === 'error') {
+              resultData = { error: d.error || '请求出错' }
+            }
+          } catch {}
+        }
+      }
+
+      // 如果用户在此期间切换了对话（streamingConvIdRef 发生变化），丢弃此响应
+      if (streamingConvIdRef.current !== cid) return
+
+      const data = resultData || { error: '未收到有效响应' }
       // LLM 智能推荐初始图表（调用 /api/chart/recommend，失败降级到规则）
       let recommendedType = 'bar'; let rx, ry, rSeries, rStacked
       if (data.sql && data.result?.length > 0 && data.columns?.length > 1) {
@@ -207,27 +431,20 @@ export default function ChatArea(props) {
             rStacked = rec.stacked
           }
         } catch {
-          // LLM 失败，降级到默认规则（仅类型和轴）
           recommendedType = autoDetectChartType(data.columns, data.result)
           const xy = autoDetectXY(data.columns, data.result); rx = xy.xCol; ry = xy.yCol
         }
       }
-      // 用 LLM 生成智能标题
-      let smartTitle = shortTitle(q)
+      // 生成智能标题
+      const chartTypeLabel = CHART_TYPES.find(t => t.key === recommendedType)?.label || recommendedType
+      const shortT = shortTitle(q)
+      let smartTitle = shortT
       if (data.sql && data.columns?.length > 0 && recommendedType) {
-        try {
-          const recRes = await fetch('/api/chart/recommend', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ question: q, history: [{ columns: data.columns, rows: data.result?.slice(0, 3)?.map(r => data.columns.map(c => r[c])) || [] }] }),
-          })
-          const rec = await recRes.json()
-          if (rec.chartType) smartTitle = shortTitle(q) + (rec.xAxis ? `- 按${rec.xAxis}` : '')
-        } catch {}
+        smartTitle = shortT + (rx ? ` — 按${rx}` : '') + ` — ${chartTypeLabel}`
       }
       const title = smartTitle
       const msg = { role: 'assistant', content: '', ...data, title, userQuestion: q, thinkingOpen: false, chartType: recommendedType, analysis: null, analysisLoading: false, manualX: rx, manualY: ry, seriesField: rSeries || '', stacked: rStacked || false, manualColor: 0, chartEditorOpen: false }
       if (data.error) {
-        // 友好化已知错误
         const err = data.error
         if (err.includes('分类器') || err.includes('router') || err.includes('意图')) msg.content = '🤔 暂时无法理解您的问题，请换个说法试试。'
         else msg.content = '❌ ' + err
@@ -237,14 +454,22 @@ export default function ChatArea(props) {
         msg.content = rowCount > 0 ? `查询完成，共 ${rowCount} 条结果` : '✅ 查询完成（无匹配数据）'
         msg.result = data.result || []; msg.columns = data.columns || []
       } else msg.content = '✅ 处理完成'
-      setMessages(prev => {
-        const newMsgs = [...prev, msg]
-        if (!data.error) saveToHistory(q, msg, newMsgs)
-        return newMsgs
+
+      // 追加助手回复到 conversations[cid]（数据源隔离）
+      setConversations(prev => {
+        const conv = prev[cid] || []
+        const updated = [...conv, msg]
+        if (!data.error) saveToHistory(q, msg, updated, cid)
+        return { ...prev, [cid]: updated }
       })
       window.dispatchEvent(new Event('chat-history-changed'))
-    } catch (e) { setMessages(prev => [...prev, { role: 'assistant', content: '❌ 请求失败: ' + e.message }]) }
-    finally { clearInterval(stepTimer); setLoading(false); setLoadingStep('') }
+    } catch (e) {
+      setConversations(prev => ({
+        ...prev,
+        [cid]: [...(prev[cid] || []), { role: 'assistant', content: '❌ 请求失败: ' + e.message }]
+      }))
+    }
+    finally { setLoading(false); setLoadingStep(''); setMascotStatus('idle'); streamingConvIdRef.current = null }
   }
 
   const toggleThinking = (i) => setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, thinkingOpen: !m.thinkingOpen } : m))
@@ -259,11 +484,20 @@ export default function ChatArea(props) {
     } catch { setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, analysis: '分析请求失败', analysisLoading: false } : m)) }
   }
 
-  const addToDashboard = (msg) => {
-    // 将查询结果转为 chartData 格式（labels/values），供 DashboardPanel 渲染
+  const addToDashboard = (msg, targetDashboard, itemType) => {
     const cols = msg.columns || []
     const data = msg.result || []
     let chartData = null
+    let metricValue = null
+
+    // 若为指标类型，从结果中提取单值
+    if (itemType === 'metric' && data.length > 0 && cols.length > 0) {
+      const row = data[0]
+      const valCol = cols[0]
+      metricValue = row[valCol] !== undefined && row[valCol] !== null ? String(row[valCol]) : '—'
+    }
+
+    // 图表类型：构建 chartData
     if (data.length > 0 && cols.length >= 2) {
       const xCol = msg.manualX || cols.find(c => typeof data[0]?.[c] !== 'number') || cols[0]
       const yCol = msg.manualY || cols.find(c => c !== xCol && typeof data[0]?.[c] === 'number') || cols.find(c => c !== xCol) || cols[0]
@@ -279,6 +513,8 @@ export default function ChatArea(props) {
       sql: msg.sql,
       result: data,
       columns: cols,
+      type: itemType || 'chart',              // 自动识别的类型: 'metric' | 'chart'
+      metricValue,                             // 指标卡数值（仅 type=metric 时有值）
       chartData,
       chartType: msg.chartType || 'bar',
       xCol: msg.manualX || '',
@@ -286,8 +522,9 @@ export default function ChatArea(props) {
       seriesField: msg.seriesField || '',
       stacked: msg.stacked || false,
       manualColor: msg.manualColor ?? 0,
+      targetDashboard: targetDashboard || '', // 目标大屏名称
     }
-    // 写入 localStorage，DashboardPanel 挂载时读取（解决标签页切换监听器不存在的问题）
+    // 带目标大屏信息写入 localStorage
     try { localStorage.setItem('pending_dashboard_item', JSON.stringify(payload)) } catch {}
     window.dispatchEvent(new CustomEvent('add-to-dashboard', { detail: payload }))
   }
@@ -327,9 +564,9 @@ export default function ChatArea(props) {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <div ref={chatAreaRef} style={{ display: 'flex', flexDirection: 'column', height: '100%', position: 'relative' }}>
       <div style={{ flex: 1, overflow: 'auto', padding: '16px 20px', display: 'flex', flexDirection: 'column', gap: 12 }}>
-        {messages.map((msg, i) => (
+        {(conversations[activeConvId] || []).map((msg, i) => (
           <div key={i} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', flexDirection: msg.role === 'user' ? 'row-reverse' : 'row' }}>
             <div style={{ width: 28, height: 28, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, background: msg.role === 'user' ? 'var(--accent)' : 'var(--bg-hover)', color: msg.role === 'user' ? '#fff' : 'var(--text-muted)' }}>
               {msg.role === 'user' ? '🐱' : '🤖'}
@@ -441,7 +678,7 @@ export default function ChatArea(props) {
         ))}
         {/* 加载态智能体气泡 — 显示状态步骤 */}
         {loading && (
-          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <div ref={loadingBubbleRef} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
             <div style={{ width: 28, height: 28, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, background: 'var(--bg-hover)', color: 'var(--text-muted)' }}>🤖</div>
             <div style={{ maxWidth: '75%', padding: '10px 14px', borderRadius: 14, fontSize: 13, background: 'var(--bg-card)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', borderBottomLeftRadius: 4, boxShadow: 'var(--shadow)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -457,14 +694,24 @@ export default function ChatArea(props) {
       </div>
 
       {suggestions.length > 0 && (
-        <div style={{ padding: '6px 16px', display: 'flex', gap: 6, flexWrap: 'wrap', borderTop: '1px solid var(--border-color)', background: 'var(--bg-secondary)', flexShrink: 0 }}>
+        <div style={{ padding: '6px 16px', display: 'flex', gap: 6, flexWrap: 'wrap', borderTop: '1px solid var(--border-color)', background: 'var(--bg-secondary)', flexShrink: 0, alignItems: 'center' }}>
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>💡</span>
           {suggestions.map(q => (
             <button key={q} onClick={() => setInput(q)} style={{ padding: '3px 12px', fontSize: 11, background: '#fff', color: 'var(--accent)', border: '1px solid var(--accent)', borderRadius: 16, cursor: 'pointer' }}>{q}</button>
           ))}
+          <button onClick={refreshSuggestions} title="换一批" style={{ padding: '2px 8px', fontSize: 11, background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>🔄 换一批</button>
         </div>
       )}
 
-      <div style={{ padding: '12px 16px', display: 'flex', gap: 8, background: 'var(--bg-primary)' }}>
+      <div style={{ padding: '12px 16px', display: 'flex', gap: 8, background: 'var(--bg-primary)', alignItems: 'center' }}>
+        <button onClick={() => setThinkingMode(prev => prev === 'normal' ? 'deep' : 'normal')}
+          title={thinkingMode === 'deep' ? '深度思考模式' : '普通模式'}
+          style={{ padding: '6px 10px', borderRadius: 8, fontSize: 12, whiteSpace: 'nowrap',
+            background: thinkingMode === 'deep' ? 'var(--accent)' : 'var(--bg-input)',
+            color: thinkingMode === 'deep' ? '#fff' : 'var(--text-muted)',
+            border: '1px solid var(--border-color)', cursor: 'pointer' }}>
+          {thinkingMode === 'deep' ? '🧠 深度' : '⚡ 普通'}
+        </button>
         <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }} placeholder="输入问题，例如：广东销售额" rows={1} disabled={loading}
           style={{ flex: 1, resize: 'none', padding: '8px 12px', fontSize: 14, border: '1px solid var(--border-color)', borderRadius: 10, background: 'var(--bg-input)', color: 'var(--text-primary)', outline: 'none', minHeight: 40, maxHeight: 120 }} />
         <button onClick={handleSend} disabled={!input.trim() || loading}
@@ -473,22 +720,63 @@ export default function ChatArea(props) {
         </button>
       </div>
 
-      {/* 添加到大屏确认弹窗 */}
+      {/* 像素小猫公仔 — 思考时在气泡上跑跳，空闲时在输入区右侧 */}
+      <ChatMascot status={mascotStatus} style={{ top: mascotPos.top, left: mascotPos.left, right: mascotPos.right, bottom: mascotPos.bottom }} />
+
+      {/* 添加到大屏确认弹窗（含类型自动识别 + 手动切换） */}
       {confirmModal && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.4)' }}
           onClick={() => setConfirmModal(null)}>
-          <div style={{ background: 'var(--bg-card)', borderRadius: 12, padding: 24, minWidth: 300, maxWidth: 420, boxShadow: '0 8px 32px rgba(0,0,0,0.2)' }}
+          <div style={{ background: 'var(--bg-card)', borderRadius: 12, padding: 24, minWidth: 360, maxWidth: 460, boxShadow: '0 8px 32px rgba(0,0,0,0.2)' }}
             onClick={e => e.stopPropagation()}>
-            <h3 style={{ fontSize: 15, fontWeight: 500, margin: '0 0 8px', color: 'var(--text-primary)', textAlign: 'center' }}>添加到大屏</h3>
-            <p style={{ fontSize: 12, color: 'var(--text-muted)', textAlign: 'center', margin: '0 0 16px' }}>
-              将当前查询结果添加到数据大屏？
-            </p>
+            <h3 style={{ fontSize: 15, fontWeight: 500, margin: '0 0 12px', color: 'var(--text-primary)', textAlign: 'center' }}>📊 添加到大屏</h3>
             {confirmModal.msg.sql && (
-              <pre style={{ fontSize: 11, padding: 8, background: 'var(--bg-secondary)', borderRadius: 6, maxHeight: 80, overflow: 'auto', margin: '0 0 16px', color: 'var(--text-secondary)' }}>{confirmModal.msg.sql}</pre>
+              <pre style={{ fontSize: 11, padding: 8, background: 'var(--bg-secondary)', borderRadius: 6, maxHeight: 60, overflow: 'auto', margin: '0 0 12px', color: 'var(--text-secondary)' }}>{confirmModal.msg.sql}</pre>
             )}
+
+            {/* 类型自动识别区域 */}
+            <div style={{ marginBottom: 14, padding: '10px 12px', background: 'var(--bg-secondary)', borderRadius: 8, border: '1px solid var(--border-color)' }}>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
+                {detectingType ? '🔍 正在识别类型...' : '🎯 类型识别结果'}
+              </div>
+              {!detectingType && (
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <span style={{
+                    fontSize: 12, fontWeight: 500,
+                    padding: '2px 10px', borderRadius: 12,
+                    background: (manualType || detectedType) === 'metric' ? '#e8f5e9' : '#e3f2fd',
+                    color: (manualType || detectedType) === 'metric' ? '#2e7d32' : '#1565c0',
+                  }}>
+                    {(manualType || detectedType) === 'metric' ? '📋 指标卡' : '📈 图表'}
+                  </span>
+                  <span style={{ fontSize: 11, color: 'var(--text-secondary)', flex: 1 }}>
+                    {(manualType || detectedType) === 'metric'
+                      ? '显示为单个数值卡片'
+                      : '显示为 ECharts 图表'}
+                  </span>
+                  {/* 手动切换按钮 */}
+                  <button onClick={() => setManualType(manualType === 'metric' ? 'chart' : 'metric')}
+                    style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, border: '1px solid var(--border-color)', background: 'var(--bg-input)', cursor: 'pointer', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                    切换为{(manualType || detectedType) === 'metric' ? '图表' : '指标'}
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>选择目标大屏：</label>
+              <select value={selectedDashboard} onChange={e => setSelectedDashboard(e.target.value)}
+                style={{ width: '100%', padding: '8px 10px', fontSize: 13, background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 8, color: 'var(--text-primary)', outline: 'none' }}>
+                {dashboardList.length === 0 && <option value="">（暂无大屏，请先在大屏面板创建）</option>}
+                {dashboardList.map(name => (
+                  <option key={name} value={name}>{name}</option>
+                ))}
+              </select>
+            </div>
             <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
-              <button onClick={() => { addToDashboard(confirmModal.msg); setConfirmModal(null) }}
-                style={{ padding: '8px 28px', fontSize: 13, cursor: 'pointer', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 8, fontWeight: 500 }}>确定</button>
+              <button onClick={() => { addToDashboard(confirmModal.msg, selectedDashboard, manualType || detectedType); setConfirmModal(null) }}
+                disabled={dashboardList.length === 0}
+                style={{ padding: '8px 28px', fontSize: 13, cursor: dashboardList.length === 0 ? 'not-allowed' : 'pointer', background: dashboardList.length === 0 ? 'var(--bg-hover)' : 'var(--accent)', color: dashboardList.length === 0 ? 'var(--text-muted)' : '#fff', border: 'none', borderRadius: 8, fontWeight: 500 }}>确定添加</button>
               <button onClick={() => setConfirmModal(null)}
                 style={{ padding: '8px 28px', fontSize: 13, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 8, color: 'var(--text-muted)' }}>取消</button>
             </div>

@@ -350,7 +350,7 @@ text2sql-agent/
 │
 ├── traces/                 # 错题本
 ├── data/
-└── .harness/               # AI 驾驶舱规则
+└── harness/               # AI 驾驶舱规则
 ```
 
 ---

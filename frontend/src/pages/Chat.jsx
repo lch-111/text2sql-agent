@@ -29,9 +29,8 @@ export default function Chat({ theme, toggleTheme }) {
       history.push({ id: cid, question: '新对话', preview: '新对话', time: new Date().toLocaleString('zh-CN'), sql: '', resultSummary: '', resultCount: 0 })
       localStorage.setItem('chat_history', JSON.stringify(history))
     } catch {}
-    // 清空当前对话消息，触发 ChatArea 重新挂载
-    try { localStorage.removeItem('chat_messages') } catch {}
-    setChatKey(cid)
+    // 触发 ChatArea 内部创建新对话（不再强制重挂载）
+    window.dispatchEvent(new CustomEvent('new-chat', { detail: { convId: String(cid) } }))
     // 通知侧栏刷新
     window.dispatchEvent(new Event('chat-history-changed'))
   }
