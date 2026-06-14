@@ -70,7 +70,7 @@ async def stream_chat(
             await asyncio.sleep(0.03)
 
         # ---- Step 3: 执行 graph_execute（线程池，不阻塞）----
-        from graph import execute as graph_execute
+        from core.graph import execute as graph_execute
 
         # run_in_executor 返回 Future，不要用 create_task 包装（否则报 Future pending）
         graph_future = loop.run_in_executor(

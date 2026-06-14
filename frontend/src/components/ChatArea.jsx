@@ -321,7 +321,7 @@ export default function ChatArea(props) {
 
   // ---- 小猫公仔位置计算 ----
   // idle 时固定在输入区右上，thinking 时定位到最新 AI 气泡上方
-  const [mascotPos, setMascotPos] = useState({ top: 'auto', left: 'auto', right: 28, bottom: 76 })
+  const [mascotPos, setMascotPos] = useState({ top: 'auto', left: 'auto', right: 16, bottom: 60 })
   useEffect(() => {
     if (mascotStatus === 'thinking' && loadingBubbleRef.current && chatAreaRef.current) {
       const bubbleEl = loadingBubbleRef.current
@@ -329,13 +329,13 @@ export default function ChatArea(props) {
       const chatRect = chatEl.getBoundingClientRect()
       const bubbleRect = bubbleEl.getBoundingClientRect()
       setMascotPos({
-        top: bubbleRect.top - chatRect.top - 50,
-        left: Math.max(40, bubbleRect.left - chatRect.left + 20),
+        top: bubbleRect.top - chatRect.top - 30,
+        left: Math.max(20, bubbleRect.left - chatRect.left + 10),
         right: 'auto',
         bottom: 'auto',
       })
     } else if (mascotStatus === 'idle') {
-      setMascotPos({ top: 'auto', left: 'auto', right: 28, bottom: 76 })
+      setMascotPos({ top: 'auto', left: 'auto', right: 16, bottom: 60 })
     }
   }, [mascotStatus, loading])
 
