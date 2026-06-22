@@ -1,11 +1,10 @@
-import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { motion } from 'framer-motion'
 import ReactEChartsCore from 'echarts-for-react'
 import * as echarts from 'echarts'
 
-// 动态加载 react-grid-layout（用 var 避免模块顶层 TDZ）
-var GridLayout = lazy(() => import('react-grid-layout').then(m => ({ default: m.default })))
-import 'react-grid-layout/css/styles.css'
+// react-grid-layout 已外部化为 CDN 全局变量，避免 Rolldown CJS→ESM TDZ
+var GridLayout = (typeof window !== 'undefined' && window.ReactGridLayout) || function() { return null }
 
 /* ============================================================================
    模块顶层先用 var 声明（var 无 TDZ，可安全引用），避免 Rolldown 编译后出现
@@ -782,7 +781,6 @@ function DashboardPanel() {
       {/* 图表区 Grid（3 列布局，动态行高适配） */}
       {chartItems.length > 0 && (
         <div className="dashboard-grid" style={{ flex: 1, overflow: 'hidden', padding: '0 16px 16px' }}>
-          <Suspense fallback={<div style={{ color: 'var(--text-muted)', textAlign: 'center', padding: 40 }}>加载布局引擎...</div>}>
           <GridLayout
             className="layout"
             layout={chartLayout}
@@ -904,7 +902,6 @@ function DashboardPanel() {
               )
             })}
           </GridLayout>
-          </Suspense>
         </div>
       )}
 

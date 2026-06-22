@@ -10,6 +10,9 @@
   </head>
   <body>
     <div id="root"></div>
+    <!-- react-grid-layout CDN：外部化为全局变量 ReactGridLayout，避免 Rolldown CJS→ESM TDZ -->
+    <link rel="stylesheet" href="https://unpkg.com/react-grid-layout@1.4.4/css/styles.css">
+    <script src="https://unpkg.com/react-grid-layout@1.4.4/dist/react-grid-layout.min.js"></script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

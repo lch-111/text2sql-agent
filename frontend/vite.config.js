@@ -13,5 +13,13 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+    rollupOptions: {
+      external: ['react-grid-layout'],
+      output: {
+        globals: {
+          'react-grid-layout': 'ReactGridLayout',
+        },
+      },
+    },
   },
 })
