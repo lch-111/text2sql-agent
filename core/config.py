@@ -59,7 +59,7 @@ class SemanticCacheConfig:
     redis_port: int = int(os.getenv("REDIS_PORT", "6379"))
     redis_db: int = int(os.getenv("REDIS_DB", "0"))
     # L2 语义缓存相似度阈值（0 ~ 1），越接近 1 要求越严格
-    similarity_threshold: float = float(os.getenv("CACHE_SIMILARITY_THRESHOLD", "0.9"))
+    similarity_threshold: float = float(os.getenv("CACHE_SIMILARITY_THRESHOLD", "0.95"))
     # 缓存 TTL（秒），默认 1 小时
     cache_ttl_seconds: int = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
 

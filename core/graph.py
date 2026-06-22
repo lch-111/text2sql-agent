@@ -89,9 +89,22 @@ class AgentState(TypedDict):
     # 额外信息
     messages: List[Dict]  # 节点日志消息
 
+    # 思维链（由 generator_node 组装，在 _format_result 中返回）
+    thinking: str  # AI 分析过程，含意图识别理由 + SQL 生成推理
+
     # 记忆系统（增强）
     conv_id: str  # 对话 ID（前端传递，用于对话级记忆隔离）
     memory_context: Dict  # 记忆上下文缓存（减少重复检索）
+
+    # ReAct Loop（增强）
+    react_loop_count: int  # ReAct 当前迭代次数（最大 10）
+    react_tool: str  # LLM 选择的工具名称
+    react_tool_input: str  # 工具输入参数
+    react_tool_output: str  # 工具执行结果
+    react_history: List[Dict]  # 工具调用历史记录
+
+    # 思考模式
+    thinking_mode: str  # "normal" | "deep"
 
 
 def create_initial_state(
@@ -99,8 +112,9 @@ def create_initial_state(
     history: list = None,
     conversation_history: list = None,
     conv_id: str = "",
+    thinking_mode: str = "normal",
 ) -> AgentState:
-    """创建初始状态（含记忆系统字段）"""
+    """创建初始状态（含记忆系统 + ReAct + 思考模式字段）"""
     return {
         "user_input": user_input,
         "normalized_input": user_input,
@@ -111,6 +125,7 @@ def create_initial_state(
         "is_follow_up": False,
         "intent": "",
         "intent_reason": "",
+        "thinking": "",
         "schema_context": "",
         "term_hints": "",
         "field_values": "",
@@ -126,7 +141,53 @@ def create_initial_state(
         "messages": [],
         "conv_id": conv_id,
         "memory_context": {},
+        "react_loop_count": 0,
+        "react_tool": "",
+        "react_tool_input": "",
+        "react_tool_output": "",
+        "react_history": [],
+        "thinking_mode": thinking_mode,
     }
+
+
+# ============================================================================
+# ReAct 工具选择 Prompt
+# ============================================================================
+
+TOOL_SELECTOR_SYSTEM_PROMPT = """你是一个智能数据分析助手。你可以使用以下工具来完成用户的查询请求：
+
+## 可用工具
+1. **search_schema(query)** — 检索数据库结构，查找与用户问题相关的表和字段。
+   - 输入：用户问题或关键词
+   - 输出：匹配的表结构信息
+
+2. **execute_sql(sql)** — 执行 SQL 查询并返回结果。
+   - 输入：完整的 SQL SELECT 语句
+   - 输出：查询结果数据
+   - 约束：只能执行 SELECT 查询
+
+3. **correct_sql(sql, error)** — 修复执行失败的 SQL。
+   - 输入：失败的 SQL + 错误信息
+   - 输出：修正后的 SQL
+
+4. **ask_user(question)** — 向用户询问澄清信息。
+   - 输入：需要澄清的问题
+   - 输出：用户回答
+
+5. **return_result(result)** — 将最终结果返回给用户并结束。
+   - 输入：最终的结果分析
+
+## 工具选择规则
+- 优先用 search_schema 了解数据库结构
+- 生成 SQL 后直接用 execute_sql 执行
+- 若执行失败，用 correct_sql 修复
+- 若信息不足，用 ask_user 澄清
+- 结果无误后，用 return_result 结束
+
+## 输出格式
+每次只选一个工具，输出 JSON：
+{"tool": "tool_name", "input": "工具输入参数", "reasoning": "选择理由"}
+"""
 
 
 # ============================================================================
@@ -204,7 +265,11 @@ def context_completion_node(state: AgentState) -> Dict:
     例如用户问"那江苏呢？"，结合上一轮上下文补全为"查询江苏省的销售额"。
 
     补全后的语句写入 completed_input 字段，
-    后续的 router_node 以 completed_input 作为分类依据。
+    同时更新 normalized_input 为补全后的标准化查询意图，
+    后续缓存检索使用标准化查询（而非原始口语），避免不同意图误命中同一缓存。
+
+    若是独立查询（非追问），清空遗留的过滤上下文，
+    防止"黑龙江"（新查询）错误继承上一轮"广东"的过滤条件。
     """
     _, _, _, _, _, conversation_mgr = _create_agents()
     start_time = __import__("time").time()
@@ -214,26 +279,43 @@ def context_completion_node(state: AgentState) -> Dict:
     last_context = conversation_mgr.get_last_context(conv_history)
 
     if not last_context:
-        return {"completed_input": user_input, "is_follow_up": False}
+        return {"completed_input": user_input, "normalized_input": user_input, "is_follow_up": False}
 
     completed = conversation_mgr.complete_query(user_input, last_context)
     is_follow_up = completed != user_input
 
-    logger.info(
-        f"[Graph] 上下文补全: "
-        f"'{user_input}' -> '{completed[:120]}' "
-        f"({'follow-up' if is_follow_up else 'independent'})"
-    )
-
-    return {
-        "completed_input": completed,
-        "is_follow_up": is_follow_up,
-        "messages": [{
-            "node": "context_completion",
-            "duration": __import__("time").time() - start_time,
-            "completed": completed,
-        }],
-    }
+    if is_follow_up:
+        # 追问：保留完整上下文，使用补全后的标准化查询作为缓存键
+        logger.info(
+            f"[Graph] 追问补全: "
+            f"'{user_input}' -> '{completed[:120]}'"
+        )
+        return {
+            "completed_input": completed,
+            "normalized_input": completed,
+            "is_follow_up": True,
+            "messages": [{
+                "node": "context_completion",
+                "duration": __import__("time").time() - start_time,
+                "completed": completed,
+            }],
+        }
+    else:
+        # 独立查询：清空遗留的过滤上下文，使用原始输入
+        logger.info(
+            f"[Graph] 独立查询，清空遗留上下文: '{user_input[:80]}'"
+        )
+        return {
+            "completed_input": user_input,
+            "normalized_input": user_input,
+            "is_follow_up": False,
+            "last_query_context": {},  # 清空遗留上下文
+            "messages": [{
+                "node": "context_completion",
+                "duration": __import__("time").time() - start_time,
+                "completed": user_input,
+            }],
+        }
 
 
 def save_context_node(state: AgentState) -> Dict:
@@ -319,6 +401,231 @@ def save_context_node(state: AgentState) -> Dict:
         "conversation_history": updated_history,
         "last_query_context": context,
     }
+
+
+# ============================================================================
+# ReAct Loop 节点 — 动态工具调用
+# ============================================================================
+
+def tool_selector_node(state: AgentState) -> Dict:
+    """
+    ReAct 工具选择节点。
+
+    LLM 根据当前状态和历史选择下一步使用的工具。
+    支持工具：search_schema, execute_sql, correct_sql, ask_user, return_result
+    最大迭代 10 次防止无限循环。
+    """
+    from core.llm_client import BaseLLMClient
+    from core.config import CONFIG
+
+    loop_count = state.get("react_loop_count", 0)
+    if loop_count >= 10:
+        return {"react_tool": "return_result", "react_tool_input": "达到最大迭代次数", "react_loop_count": loop_count + 1}
+
+    # 构建上下文
+    user_input = state.get("normalized_input", "") or state.get("user_input", "")
+    schema = state.get("schema_context", "")
+    sql = state.get("sql", "")
+    error = state.get("error", "")
+    result = state.get("result", [])
+    react_history = state.get("react_history", [])
+    thinking_mode = state.get("thinking_mode", "normal")
+
+    # 构建历史摘要
+    history_summary = "\n".join([
+        f"  {h['tool']}: {h.get('input', '')[:100]} → {h.get('output', '')[:100]}"
+        for h in react_history[-5:]
+    ])
+
+    prompt = f"""用户问题: {user_input}
+
+当前状态：
+- Schema: {"已检索" if schema else "未检索"}
+- SQL: {sql[:100] if sql else "未生成"}
+- 错误: {error or "无"}
+- 结果: {len(result)} 条数据
+- 迭代: {loop_count}/10
+
+历史工具调用：
+{history_summary or "无"}
+
+请选择下一步工具。"""
+
+    # 深度思考模式：增加详细分析指令
+    sys_prompt = TOOL_SELECTOR_SYSTEM_PROMPT
+    if thinking_mode == "deep":
+        sys_prompt += "\n\n## 深度分析模式\n请进行详细的逐步分析。花时间思考每个工具的适用性，考虑多种可能的查询方法，选择最优方案。输出中增加分析步骤。"
+
+    try:
+        llm = BaseLLMClient(
+            model=CONFIG.llm.router_model,
+            base_url=CONFIG.llm.glm_base_url,
+            api_key=CONFIG.llm.glm_api_key,
+            name="tool_selector",
+        )
+        raw = llm.generate(prompt=prompt, system_prompt=sys_prompt)
+        parsed = _parse_tool_response(raw)
+
+        if not parsed or "tool" not in parsed:
+            parsed = {"tool": "return_result", "input": "无法解析工具选择"}
+
+        logger.info(f"[ReAct] 选择工具: {parsed['tool']} (第 {loop_count + 1} 次)")
+        return {
+            "react_tool": parsed["tool"],
+            "react_tool_input": parsed.get("input", ""),
+        }
+    except Exception as e:
+        logger.warning(f"[ReAct] 工具选择失败: {e}")
+        return {"react_tool": "return_result", "react_tool_input": "工具选择异常"}
+
+
+def tool_executor_node(state: AgentState) -> Dict:
+    """
+    ReAct 工具执行节点。
+
+    根据 tool_selector 选择的工具分发执行。
+    """
+    tool = state.get("react_tool", "")
+    tool_input = state.get("react_tool_input", "")
+    loop_count = state.get("react_loop_count", 0) + 1
+    react_history = list(state.get("react_history", []))
+
+    logger.info(f"[ReAct] 执行工具: {tool} (第 {loop_count} 次)")
+
+    result_update = {
+        "react_loop_count": loop_count,
+        "react_tool_output": "",
+    }
+
+    if tool == "search_schema":
+        # 调用 SchemaRetriever
+        try:
+            from agents.schema_retriever import SchemaRetriever
+            retriever = SchemaRetriever()
+            schema_text = retriever.build_schema_text(tool_input or state.get("user_input", ""))
+            result_update["schema_context"] = schema_text
+            result_update["react_tool_output"] = f"找到 {schema_text.count('(')} 个表/字段"
+            logger.info(f"[ReAct] Schema 检索完成")
+        except Exception as e:
+            result_update["react_tool_output"] = f"检索失败: {e}"
+
+    elif tool == "execute_sql":
+        # 执行 SQL
+        try:
+            from agents.executor_agent import ExecutorAgent
+            executor = ExecutorAgent()
+            sql_to_execute = tool_input or state.get("sql", "")
+            exec_result = executor.execute_with_result(sql_to_execute)
+            result_update["result"] = exec_result.get("result", [])
+            result_update["columns"] = exec_result.get("columns", [])
+            result_update["error"] = exec_result.get("error")
+            result_update["sql"] = sql_to_execute
+            row_count = len(exec_result.get("result", []))
+            result_update["react_tool_output"] = f"执行完成，返回 {row_count} 条数据" if not exec_result.get("error") else f"执行失败: {exec_result['error']}"
+        except Exception as e:
+            result_update["error"] = str(e)
+            result_update["react_tool_output"] = f"执行异常: {e}"
+
+    elif tool == "correct_sql":
+        # 修正 SQL
+        try:
+            from agents.critic_agent import CriticAgent
+            from core.cache import get_cache
+            _, gen, critic, _, _, _ = _create_agents()
+            cache = get_cache()
+            mm = getattr(cache, "memory_manager", None)
+            corrected = critic.self_correction_loop(
+                original_query=state.get("normalized_input", ""),
+                failed_sql=state.get("sql", ""),
+                error_message=state.get("error", ""),
+                schema_context=state.get("schema_context", ""),
+                conv_id=state.get("conv_id", ""),
+                memory_manager=mm,
+            )
+            if corrected:
+                result_update["sql"] = corrected
+                result_update["error"] = ""
+                result_update["react_tool_output"] = "修正成功"
+            else:
+                result_update["react_tool_output"] = "修正失败"
+        except Exception as e:
+            result_update["react_tool_output"] = f"修正异常: {e}"
+
+    elif tool == "ask_user":
+        # 向用户询问澄清
+        result_update["clarification"] = tool_input or "请提供更多信息"
+        result_update["react_tool_output"] = f"已向用户提问: {tool_input}"
+
+    elif tool == "return_result":
+        # 返回结果 — 无额外操作，react loop 会路由到 END
+        result_update["react_tool_output"] = "准备返回结果"
+        if not state.get("result") and state.get("sql"):
+            # 如果有 SQL 但未执行，尝试执行
+            try:
+                from agents.executor_agent import ExecutorAgent
+                executor = ExecutorAgent()
+                exec_result = executor.execute_with_result(state["sql"])
+                result_update["result"] = exec_result.get("result", [])
+                result_update["columns"] = exec_result.get("columns", [])
+                result_update["error"] = exec_result.get("error")
+            except Exception:
+                pass
+
+    # 记录工具调用历史
+    react_history.append({
+        "tool": tool,
+        "input": tool_input[:200],
+        "output": result_update.get("react_tool_output", "")[:200],
+    })
+    result_update["react_history"] = react_history
+
+    return result_update
+
+
+def _parse_tool_response(raw: str) -> dict:
+    """解析 LLM 工具选择响应为 JSON"""
+    if not raw:
+        return {}
+    import re
+    # 尝试提取 JSON 块
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+    if m:
+        raw = m.group(1)
+    m = re.search(r"\{[^{}]*\"tool\"[^{}]*\}", raw)
+    if m:
+        try:
+            return json.loads(m.group())
+        except json.JSONDecodeError:
+            pass
+    # LED 回退
+    if '"return_result"' in raw or "return_result" in raw:
+        return {"tool": "return_result", "input": ""}
+    if '"execute_sql"' in raw:
+        return {"tool": "execute_sql", "input": ""}
+    if '"search_schema"' in raw:
+        return {"tool": "search_schema", "input": ""}
+    return {"tool": "return_result", "input": "默认结束"}
+
+
+def react_router(state: AgentState) -> str:
+    """
+    ReAct 循环路由。
+
+    规则：
+    - 工具 = "return_result" → 结束循环
+    - 迭代 ≥ 10 → 强制结束
+    - 工具 = "ask_user" → 结束（等待用户输入）
+    - 其他 → 继续循环
+    """
+    tool = state.get("react_tool", "")
+    loop_count = state.get("react_loop_count", 0)
+
+    if tool == "return_result" or loop_count >= 10:
+        return "end"
+    if tool == "ask_user":
+        return "end"  # 等待用户澄清
+    return "continue"
+
 
 def router_node(state: AgentState) -> Dict:
     """
@@ -523,8 +830,25 @@ def generator_node(state: AgentState) -> Dict:
     SQL 生成节点。
 
     调用 GeneratorAgent 根据 Schema 上下文生成 SQL。
+    若 Schema 为空或无效，跳过 LLM 调用直接返回"未找到相关数据表"错误。
     """
     from agents.generator_agent import GeneratorAgent
+
+    # ---- Schema 空值保护：无表结构时禁止生成 SQL ----
+    schema_text = state.get("schema_context", "").strip()
+    if not schema_text or schema_text == "（无表结构）":
+        logger.warning(f"[Graph] Schema 为空，跳过 SQL 生成")
+        return {
+            "sql": "",
+            "thinking": "数据库中没有相关数据表，无法生成 SQL",
+            "messages": [
+                {
+                    "node": "generate",
+                    "duration": 0,
+                    "result": "no_schema",
+                }
+            ],
+        }
 
     _, _, generator, _, _, _ = _create_agents()
     start = time.time()
@@ -600,13 +924,68 @@ def executor_node(state: AgentState) -> Dict:
     SQL 执行节点。
 
     调用 ExecutorAgent 执行 SQL（含 SQLGuard 物理安全拦截）。
+    若 SQL 为空（Schema 无效/生成失败），直接返回错误不执行。
+    执行前校验表名是否真实存在，防止 LLM 幻觉引用不存在的表。
     """
     from agents.executor_agent import ExecutorAgent
+
+    # ---- 空 SQL 保护：Schema 为空或生成失败时直接返回 ----
+    sql = (state.get("sql") or "").strip()
+    if not sql:
+        logger.warning("[Graph] SQL 为空，跳过执行")
+        return {
+            "result": [],
+            "columns": [],
+            "error": "未找到相关数据表，请先连接数据库或上传文件",
+            "execution_time": 0,
+            "messages": [
+                {
+                    "node": "execute",
+                    "duration": 0,
+                    "result": "no_sql",
+                }
+            ],
+        }
+
+    # ---- 表名存在性校验：防止 LLM 幻觉引用不存在的表 ----
+    try:
+        from services.sql_validator import SQLSyntaxValidator
+        from core.database import get_db
+
+        validator = SQLSyntaxValidator()
+        extracted_tables = validator.extract_tables(sql)
+        if extracted_tables:
+            db = get_db()
+            real_tables = db.get_table_names()
+            # 统一转为小写比较
+            real_lower = {t.lower() for t in real_tables}
+            for tbl in extracted_tables:
+                if tbl.lower() not in real_lower:
+                    logger.warning(
+                        f"[Graph] SQL 引用不存在的表 '{tbl}'，"
+                        f"可用表: {real_tables}"
+                    )
+                    return {
+                        "result": [],
+                        "columns": [],
+                        "error": f"数据库中不存在表 '{tbl}'，可用表: {', '.join(real_tables)}。请修正表名后重试。",
+                        "execution_time": 0,
+                        "messages": [
+                            {
+                                "node": "execute",
+                                "duration": 0,
+                                "result": "table_not_found",
+                            }
+                        ],
+                    }
+    except Exception as e:
+        # 表名校验失败不阻断执行，仅记录警告
+        logger.warning(f"[Graph] 表名存在性校验异常: {e}")
 
     _, _, _, _, executor, _ = _create_agents()
     start = time.time()
 
-    result = executor.execute_with_result(state["sql"])
+    result = executor.execute_with_result(sql)
 
     duration = time.time() - start
     logger.info(f"[Graph] SQL 执行完成 ({duration:.2f}s)")
@@ -789,6 +1168,9 @@ def build_graph():
     workflow.add_node("self_correction", self_correction_node)
     workflow.add_node("write_cache", write_cache_node)
     workflow.add_node("save_context", save_context_node)
+    # ---- ReAct Loop 节点 ----
+    workflow.add_node("tool_selector", tool_selector_node)
+    workflow.add_node("tool_executor", tool_executor_node)
 
     # ---- 设置入口 ----
     workflow.set_entry_point("context_completion")
@@ -814,8 +1196,10 @@ def build_graph():
         {"hit": "save_context", "miss": "retrieve_schema"},
     )
 
-    # ---- 固定边：Schema 检索 → 记忆上下文 → 生成 ----
+    # ---- 固定边：Schema 检索 → 记忆上下文 ----
     workflow.add_edge("retrieve_schema", "build_memory_context")
+
+    # ---- SQL 生成流水线（generator → critic → executor）----
     workflow.add_edge("build_memory_context", "generator")
 
     # ---- 条件边：Critic ----
@@ -910,6 +1294,15 @@ def run_simple(state: AgentState) -> Dict[str, Any]:
     # ---- Schema 检索 ----
     schema_result = retrieve_schema_node(state)
     state.update(schema_result)
+
+    # ---- Schema 空值保护：无表结构时跳过 SQL 生成 ----
+    schema_text = state.get("schema_context", "").strip()
+    if not schema_text or schema_text == "（无表结构）":
+        logger.warning("[Graph] Schema 为空，跳过 SQL 生成")
+        state["error"] = "未找到相关数据表，请先连接数据库或上传文件"
+        state["sql"] = ""
+        state["thinking"] = "数据库中没有相关数据表，无法生成 SQL"
+        return _format_result(state, start_time)
 
     # ---- 记忆上下文构建 ----
     memory_result = build_memory_context_node(state)
@@ -1009,9 +1402,10 @@ def execute(
     history: list = None,
     conversation_history: list = None,
     conv_id: str = "",
+    thinking_mode: str = "normal",
 ) -> Dict[str, Any]:
     """
-    统一执行入口（增强版 — 支持记忆系统）。
+    统一执行入口（增强版 — 支持记忆系统 + ReAct Loop + 思考模式）。
 
     优先使用 LangGraph 图编排，不可用时降级到简易模式。
 
@@ -1020,6 +1414,7 @@ def execute(
         history: 原始对话历史（前端传入）
         conversation_history: 结构化查询历史（跨轮追问用）
         conv_id: 对话 ID（用于对话级记忆隔离）
+        thinking_mode: "normal" 或 "deep"
 
     返回:
         结果字典（与原有 get_agent().run() 兼容）
@@ -1029,6 +1424,7 @@ def execute(
         history=history,
         conversation_history=conversation_history,
         conv_id=conv_id,
+        thinking_mode=thinking_mode,
     )
 
     graph = get_graph()
