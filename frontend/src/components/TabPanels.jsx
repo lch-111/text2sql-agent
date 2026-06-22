@@ -1,9 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from 'react'
-import GridLayout from 'react-grid-layout'
-import 'react-grid-layout/css/styles.css'
+import { useState, useEffect, useCallback, useRef, lazy, Suspense } from 'react'
 import { motion } from 'framer-motion'
 import ReactEChartsCore from 'echarts-for-react'
 import * as echarts from 'echarts'
+
+// 动态加载 react-grid-layout，避免 Rolldown CJS→ESM 转换中的 TDZ
+const GridLayout = lazy(() => import('react-grid-layout').then(m => ({ default: m.default })))
+import 'react-grid-layout/css/styles.css'
 
 /* ============================================================================
    初始化顺序声明（所有 const 在模块顶层先初始化，避免 Rolldown CJS→ESM 转换中的 TDZ）
@@ -776,6 +778,7 @@ function DashboardPanel() {
       {/* 图表区 Grid（3 列布局，动态行高适配） */}
       {chartItems.length > 0 && (
         <div className="dashboard-grid" style={{ flex: 1, overflow: 'hidden', padding: '0 16px 16px' }}>
+          <Suspense fallback={<div style={{ color: 'var(--text-muted)', textAlign: 'center', padding: 40 }}>加载布局引擎...</div>}>
           <GridLayout
             className="layout"
             layout={chartLayout}
@@ -897,6 +900,7 @@ function DashboardPanel() {
               )
             })}
           </GridLayout>
+          </Suspense>
         </div>
       )}
 
