@@ -5,9 +5,28 @@ import { motion } from 'framer-motion'
 import ReactEChartsCore from 'echarts-for-react'
 import * as echarts from 'echarts'
 
+/* ============================================================================
+   初始化顺序声明（所有 const 在模块顶层先初始化，避免 Rolldown CJS→ESM 转换中的 TDZ）
+   ============================================================================ */
 const panelVariants = {
   hidden: { opacity: 0, y: 12 },
   visible: { opacity: 1, y: 0, transition: { duration: 0.3 } },
+}
+const Label = ({ children }) => <label style={{ display: 'block', fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>{children}</label>
+const selectStyle = {
+  padding: '4px 8px', fontSize: 12, borderRadius: 6,
+  background: 'var(--bg-input)', border: '1px solid var(--border-color)',
+  color: 'var(--text-primary)', outline: 'none',
+}
+const smallInputStyle = {
+  padding: '4px 8px', fontSize: 12, borderRadius: 6,
+  background: 'var(--bg-input)', border: '1px solid var(--border-color)',
+  color: 'var(--text-primary)', outline: 'none', width: 120,
+}
+const selStyle2 = {
+  padding: '2px 6px', fontSize: 10, borderRadius: 4,
+  background: 'var(--bg-input)', border: '1px solid var(--border-color)',
+  color: 'var(--text-primary)', outline: 'none',
 }
 
 /** HEX 颜色转 RGBA（支持透明度）*/
@@ -20,16 +39,6 @@ function hexToRgba(hex, alpha) {
   const b = parseInt(clean.slice(4, 6), 16)
   if (isNaN(r) || isNaN(g) || isNaN(b)) return hex
   return `rgba(${r},${g},${b},${alpha})`
-}
-
-export default function TabPanels({ activeTab }) {
-  switch (activeTab) {
-    case 'dashboard': return <DashboardPanel />
-    case 'monitor': return <MonitorPanel />
-    case 'tables': return <TablesPanel />
-    case 'eval': return <EvalPanel />
-    default: return null
-  }
 }
 
 /* ============================================================================
@@ -910,23 +919,17 @@ function DashboardPanel() {
   )
 }
 
-// 辅助样式
-const Label = ({ children }) => <label style={{ display: 'block', fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>{children}</label>
-const selectStyle = {
-  padding: '4px 8px', fontSize: 12, borderRadius: 6,
-  background: 'var(--bg-input)', border: '1px solid var(--border-color)',
-  color: 'var(--text-primary)', outline: 'none',
+// TabPanels 导出放在所有函数定义之后，避免 Rolndown CJS→ESM 的 TDZ 问题
+function TabPanels({ activeTab }) {
+  switch (activeTab) {
+    case 'dashboard': return <DashboardPanel />
+    case 'monitor': return <MonitorPanel />
+    case 'tables': return <TablesPanel />
+    case 'eval': return <EvalPanel />
+    default: return null
+  }
 }
-const smallInputStyle = {
-  padding: '4px 8px', fontSize: 12, borderRadius: 6,
-  background: 'var(--bg-input)', border: '1px solid var(--border-color)',
-  color: 'var(--text-primary)', outline: 'none', width: 120,
-}
-const selStyle2 = {
-  padding: '2px 6px', fontSize: 10, borderRadius: 4,
-  background: 'var(--bg-input)', border: '1px solid var(--border-color)',
-  color: 'var(--text-primary)', outline: 'none',
-}
+export default TabPanels
 
 /* ============================================================================
    系统监控 — 缓存状态 + 请求趋势 + 响应时间 + Token 消耗
