@@ -3,29 +3,33 @@ import { motion } from 'framer-motion'
 import ReactEChartsCore from 'echarts-for-react'
 import * as echarts from 'echarts'
 
-// 动态加载 react-grid-layout，避免 Rolldown CJS→ESM 转换中的 TDZ
-const GridLayout = lazy(() => import('react-grid-layout').then(m => ({ default: m.default })))
+// 动态加载 react-grid-layout（用 var 避免模块顶层 TDZ）
+var GridLayout = lazy(() => import('react-grid-layout').then(m => ({ default: m.default })))
 import 'react-grid-layout/css/styles.css'
 
 /* ============================================================================
-   初始化顺序声明（所有 const 在模块顶层先初始化，避免 Rolldown CJS→ESM 转换中的 TDZ）
+   模块顶层先用 var 声明（var 无 TDZ，可安全引用），避免 Rolldown 编译后出现
+   "Cannot access 'L/G/K' before initialization" 错误。
    ============================================================================ */
-const panelVariants = {
+var panelVariants = {
   hidden: { opacity: 0, y: 12 },
   visible: { opacity: 1, y: 0, transition: { duration: 0.3 } },
 }
-const Label = ({ children }) => <label style={{ display: 'block', fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>{children}</label>
-const selectStyle = {
+/** Label 辅助组件（函数声明完全 hoisted，无 TDZ）*/
+function Label({ children }) {
+  return <label style={{ display: 'block', fontSize: 11, color: 'var(--text-muted)', marginBottom: 2 }}>{children}</label>
+}
+var selectStyle = {
   padding: '4px 8px', fontSize: 12, borderRadius: 6,
   background: 'var(--bg-input)', border: '1px solid var(--border-color)',
   color: 'var(--text-primary)', outline: 'none',
 }
-const smallInputStyle = {
+var smallInputStyle = {
   padding: '4px 8px', fontSize: 12, borderRadius: 6,
   background: 'var(--bg-input)', border: '1px solid var(--border-color)',
   color: 'var(--text-primary)', outline: 'none', width: 120,
 }
-const selStyle2 = {
+var selStyle2 = {
   padding: '2px 6px', fontSize: 10, borderRadius: 4,
   background: 'var(--bg-input)', border: '1px solid var(--border-color)',
   color: 'var(--text-primary)', outline: 'none',
