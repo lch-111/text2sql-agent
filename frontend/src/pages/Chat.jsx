@@ -19,17 +19,14 @@ export default function Chat({ theme, toggleTheme }) {
   const [activeTab, setActiveTab] = useState('chat')
   const [leftOpen, setLeftOpen] = useState(true)
   const [rightOpen, setRightOpen] = useState(true)
-  const [chatKey, setChatKey] = useState(Date.now())
+  // 恢复上次活跃对话 ID，刷新后保持同一对话
+  const [chatKey, setChatKey] = useState(() => {
+    try { return localStorage.getItem('chat_active_conv') || Date.now() } catch { return Date.now() }
+  })
 
   const newChat = () => {
     const cid = Date.now()
-    // 创建新对话历史条目（仅手动新建才创建卡片）
-    try {
-      const history = JSON.parse(localStorage.getItem('chat_history') || '[]')
-      history.push({ id: cid, question: '新对话', preview: '新对话', time: new Date().toLocaleString('zh-CN'), sql: '', resultSummary: '', resultCount: 0 })
-      localStorage.setItem('chat_history', JSON.stringify(history))
-    } catch {}
-    // 触发 ChatArea 内部创建新对话（不再强制重挂载）
+    // 触发 ChatArea 内部创建新对话
     window.dispatchEvent(new CustomEvent('new-chat', { detail: { convId: String(cid) } }))
     // 通知侧栏刷新
     window.dispatchEvent(new Event('chat-history-changed'))
@@ -59,7 +56,7 @@ export default function Chat({ theme, toggleTheme }) {
             background: 'var(--bg-input)', border: '1px solid var(--border-color)',
             borderRadius: 6, color: 'var(--text-muted)',
           }}>
-            ✨ 新建对话
+            新建对话
           </button>
         </div>
         <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
@@ -76,7 +73,7 @@ export default function Chat({ theme, toggleTheme }) {
 
       <div style={{ display: 'flex', flex: 1, overflow: 'hidden' }}>
         {/* Left sidebar */}
-        <HistorySidebar open={leftOpen} onToggle={() => setLeftOpen(!leftOpen)} />
+        <HistorySidebar open={leftOpen} onToggle={() => { setLeftOpen(v => !v); window.dispatchEvent(new Event('sidebar-toggle')) }} />
 
         {/* Main content */}
         <main style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
@@ -105,7 +102,7 @@ export default function Chat({ theme, toggleTheme }) {
           </nav>
 
           {/* Tab content */}
-          <div style={{ flex: 1, overflow: 'auto' }}>
+          <div style={{ flex: 1, overflow: 'hidden' }}>
             {/* 始终渲染 ChatArea，仅切换可见性以保持消息状态 */}
             <div style={{ display: activeTab === 'chat' ? 'block' : 'none', height: '100%' }}>
               <ChatArea key={chatKey} convId={chatKey} />
@@ -119,7 +116,7 @@ export default function Chat({ theme, toggleTheme }) {
         </main>
 
         {/* Right sidebar */}
-        <ToolsSidebar open={rightOpen} onToggle={() => setRightOpen(!rightOpen)} />
+        <ToolsSidebar open={rightOpen} onToggle={() => { setRightOpen(v => !v); window.dispatchEvent(new Event('sidebar-toggle')) }} />
       </div>
     </motion.div>
   )

@@ -42,3 +42,16 @@ html, body, #root {
 
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-thumb { background: var(--border-color); border-radius: 3px; }
+
+/* Dashboard 深色底板样式（跟随系统主题） */
+.dashboard-board .react-grid-item { border-radius: 10px; overflow: hidden; }
+.dashboard-board .react-grid-item { transition: box-shadow 0.2s ease; }
+.dashboard-board .react-grid-item:hover { box-shadow: var(--shadow); }
+.dashboard-card-actions { opacity: 0; transition: opacity 0.2s ease; }
+.dashboard-grid-card:hover .dashboard-card-actions,
+.react-grid-item:hover .dashboard-card-actions { opacity: 1; }
+.kpi-metric-card:hover .dashboard-card-actions { opacity: 1; }
+/* GridLayout 内部紧凑无多余间距 */
+.dashboard-board .react-grid-layout { margin: 0; }
+.dashboard-board .react-grid-item .react-resizable-handle { opacity: 0.3; }
+.dashboard-board .react-grid-item:hover .react-resizable-handle { opacity: 0.8; }

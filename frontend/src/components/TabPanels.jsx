@@ -39,6 +39,10 @@ function DashboardPanel() {
   const DASHBOARDS_KEY = 'dashboard_manager'
   const CUSTOM_STORAGE_KEY = 'dashboard_custom_charts'
   const containerRef = useRef(null)
+  const dashboardRef = useRef(null)
+  const headerRef = useRef(null)
+  const [dashSize, setDashSize] = useState({ w: 1200, h: 800 })
+  const [headerH, setHeaderH] = useState(180)
 
   // 多屏列表
   const [dashboards, setDashboards] = useState(() => {
@@ -83,6 +87,7 @@ function DashboardPanel() {
   const [columns, setColumns] = useState([])
   const [builderForm, setBuilderForm] = useState({ table: '', xCol: '', yCol: '', chartType: 'bar', title: '', joinTable: '', joinOn: '', aggFunc: '' })
   const [metricForm, setMetricForm] = useState({ table: '', column: '', aggFunc: 'COUNT', filter: '', title: '' })
+  const [customCharts, setCustomCharts] = useState([])
 
   useEffect(() => {
     fetch('/api/db/status').then(r => r.json()).then(d => setTables(d.tables || [])).catch(() => {})
@@ -99,7 +104,7 @@ function DashboardPanel() {
           const newItem = { ...item, id, type: itemType }
           const targetName = item.targetDashboard
           const isMetric = itemType === 'metric'
-          const layoutSize = isMetric ? { w: 3, h: 1 } : { w: 6, h: 4 }
+          const layoutSize = isMetric ? { w: 3, h: 1 } : { w: 3, h: 4 }
 
           if (targetName) {
             // 添加到指定大屏
@@ -126,6 +131,24 @@ function DashboardPanel() {
     } catch {}
   }, [])
 
+  // 监听仪表板容器尺寸变化，响应式适配
+  useEffect(() => {
+    const el = dashboardRef.current
+    if (!el) return
+    const ro = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        setDashSize({ w: entry.contentRect.width, h: entry.contentRect.height })
+      }
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [])
+
+  // 实时测量顶部控件区域高度，确保图表区准确填满剩余空间
+  useEffect(() => {
+    if (headerRef.current) setHeaderH(headerRef.current.offsetHeight)
+  }, [items.length, builderVisible, metricVisible, previewColor, previewOpacity, themeStack.length])
+
   // 监听从 ChatArea 发来的添加到大屏事件（支持目标大屏选择）
   useEffect(() => {
     const handler = (e) => {
@@ -135,7 +158,7 @@ function DashboardPanel() {
       const newItem = { ...item, id, type: itemType }
       const targetName = item.targetDashboard
       const isMetric = itemType === 'metric'
-      const layoutSize = isMetric ? { w: 3, h: 1 } : { w: 6, h: 4 }
+      const layoutSize = isMetric ? { w: 3, h: 1 } : { w: 3, h: 4 }
 
       if (targetName) {
         // 添加到指定大屏
@@ -240,18 +263,20 @@ function DashboardPanel() {
         xCol,
         yCol,
       }
+      setItems(prev => [...prev, chartItem])
       setCustomCharts(prev => {
         const next = [...prev, chartItem]
         localStorage.setItem(CUSTOM_STORAGE_KEY, JSON.stringify(next))
         return next
       })
-      setLayout(prev => [...prev, { i: id, x: 0, y: 100, w: 6, h: 4 }])
+      setLayout(prev => [...prev, { i: id, x: 0, y: 100, w: 3, h: 4 }])
       setBuilderVisible(false)
       setBuilderForm({ table: '', xCol: '', yCol: '', chartType: 'bar', title: '' })
     } catch {}
   }
 
   const removeCustomChart = (id) => {
+    setItems(prev => prev.filter(i => i.id !== id))
     setCustomCharts(prev => {
       const next = prev.filter(c => c.id !== id)
       localStorage.setItem(CUSTOM_STORAGE_KEY, JSON.stringify(next))
@@ -430,7 +455,7 @@ function DashboardPanel() {
     const d = item.chartData
     if (!d || !d.labels) return null
     // 单个图表手动配色优先 → 全局预览配色 → 已保存配色 → 默认
-    const effectiveColor = item.manualColor ?? previewColor ?? 0
+    const effectiveColor = previewColor ?? item.manualColor ?? 0
     const colors = COLOR_SCHEMES[effectiveColor]?.colors || COLOR_SCHEMES[0].colors
     const ct = item.chartType || 'bar'
     const labels = d.labels
@@ -475,213 +500,263 @@ function DashboardPanel() {
     }
   }
 
+  // ---- 布局计算：指标分离、动态行高 ----
+  const metricItems = items.filter(i => i.type === 'metric')
+  const chartItems = items.filter(i => i.type !== 'metric')
+  const metricIds = new Set(metricItems.map(m => m.id))
+  const chartLayout = layout.filter(l => !metricIds.has(l.i))
+
+  // 动态行高：根据容器剩余高度和图表总行数计算，确保一屏内无滚动
+  const availGridH = Math.max(dashSize.h - headerH - 16, 100)
+  const maxRows = chartLayout.length > 0
+    ? Math.max(...chartLayout.map(l => l.y + l.h), 4)
+    : 4
+  const rowHeight = Math.min(Math.max(Math.floor(availGridH / maxRows), 35), 110)
+
   return (
     <motion.div
-      ref={containerRef}
+      ref={dashboardRef}
       variants={panelVariants} initial="hidden" animate="visible"
-      style={{ padding: 16, height: '100%', overflow: 'auto', background: isFullscreen ? 'var(--bg-primary)' : undefined }}
+      className="dashboard-board"
+      style={{
+        height: '100%',
+        overflow: 'hidden',
+        background: 'var(--bg-secondary)',
+        display: 'flex',
+        flexDirection: 'column',
+      }}
     >
-      {/* 多屏标签栏 + 新建大屏 */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-        {dashboards.map((db, i) => (
-          <div key={db.id} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-            <button onClick={() => setActiveIdx(i)}
-              style={{ padding: '4px 10px', fontSize: 13, cursor: 'pointer', borderRadius: 6, border: activeIdx === i ? '2px solid var(--accent)' : '1px solid var(--border-color)', background: activeIdx === i ? 'rgba(138,155,174,0.15)' : 'var(--bg-input)', color: 'var(--text-primary)', fontWeight: activeIdx === i ? 600 : 400 }}>
-              {db.name}
-            </button>
-            {dashboards.length > 1 && activeIdx === i && (
-              <span onClick={() => { if (window.confirm('确定删除此大屏及其所有图表？')) delDashboard(i) }} style={{ cursor: 'pointer', color: '#e74c3c', fontSize: 14, padding: '0 2px' }}>×</span>
+      {/* 顶部控件区域（多屏标签、标题、配色、工具栏、构建器） */}
+      <div ref={headerRef} style={{ flexShrink: 0 }}>
+        {/* 多屏标签栏 + 新建大屏 */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '12px 16px 0', flexWrap: 'wrap' }}>
+          {dashboards.map((db, i) => (
+            <div key={db.id} style={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              <button onClick={() => setActiveIdx(i)}
+                style={{ padding: '4px 10px', fontSize: 13, cursor: 'pointer', borderRadius: 6, border: activeIdx === i ? '2px solid var(--accent)' : '1px solid var(--border-color)', background: activeIdx === i ? 'rgba(138,155,174,0.15)' : 'var(--bg-input)', color: 'var(--text-primary)', fontWeight: activeIdx === i ? 600 : 400 }}>
+                {db.name}
+              </button>
+              {dashboards.length > 1 && activeIdx === i && (
+                <span onClick={() => { if (window.confirm('确定删除此大屏及其所有图表？')) delDashboard(i) }} style={{ cursor: 'pointer', color: '#e74c3c', fontSize: 14, padding: '0 2px' }}>×</span>
+              )}
+            </div>
+          ))}
+          <button onClick={addDashboard} style={{ padding: '4px 8px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px dashed var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>+ 新建大屏</button>
+        </div>
+
+        {/* 标题 */}
+        <div style={{ textAlign: 'center', padding: '4px 16px 0' }}>
+          {renaming ? (
+            <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
+              <input value={renameVal} onChange={e => setRenameVal(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') doRename() }} autoFocus
+                style={{ padding: '4px 10px', fontSize: 18, fontWeight: 600, borderRadius: 6, background: 'var(--bg-input)', border: '1px solid var(--accent)', color: 'var(--text-primary)', outline: 'none', textAlign: 'center', width: 220 }} />
+              <button onClick={doRename} style={{ padding: '4px 10px', fontSize: 12, cursor: 'pointer', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 4 }}>✓</button>
+            </div>
+          ) : (
+            <h2 style={{ fontSize: 20, fontWeight: 700, margin: 0, cursor: 'pointer', color: 'var(--text-primary)', letterSpacing: '-0.02em' }}
+              onClick={() => { setRenameVal(active.name); setRenaming(true) }}>
+              {active.name}
+            </h2>
+          )}
+        </div>
+
+        {/* 统一改色 + 容器透明度 + 撤销栈 */}
+        {items.length > 0 && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 16px', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>🎨 统一配色:</span>
+            <select value={previewColor ?? ''} onChange={e => handleThemeSelect(e.target.value)} style={{ padding: '3px 8px', fontSize: 12, borderRadius: 6, background: 'var(--bg-input)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', outline: 'none' }}>
+              <option value="">——</option>
+              {COLOR_SCHEMES.map((s, i) => (
+                <option key={s.name} value={i}>{s.name}</option>
+              ))}
+            </select>
+
+            <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 4 }}>🔲 透明度:</span>
+            <input type="range" min="0" max="100"
+              value={Math.round((previewOpacity ?? savedOpacity) * 100)}
+              onChange={e => setPreviewOpacity(Number(e.target.value) / 100)}
+              style={{ width: 80, cursor: 'pointer', accentColor: 'var(--accent)' }} />
+            <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 32 }}>{Math.round((previewOpacity ?? savedOpacity) * 100)}%</span>
+
+            {(previewColor !== null || previewOpacity !== null) && (
+              <button onClick={applyTheme} style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 6 }}>
+                确定
+              </button>
+            )}
+            {(previewColor !== null || previewOpacity !== null) && (
+              <button onClick={cancelPreview} style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>
+                取消
+              </button>
+            )}
+            {themeStack.length > 0 && previewColor === null && previewOpacity === null && (
+              <button onClick={undoThemeStep} title="从撤销栈恢复上一步配色和透明度设置"
+                style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>
+                ↩ 恢复上一步{themeStack.length > 1 ? `(${themeStack.length})` : ''}
+              </button>
             )}
           </div>
-        ))}
-        <button onClick={addDashboard} style={{ padding: '4px 8px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px dashed var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>+ 新建大屏</button>
-      </div>
+        )}
 
-      {/* 标题 */}
-      <div style={{ textAlign: 'center', marginBottom: 8 }}>
-        {renaming ? (
-          <div style={{ display: 'flex', gap: 4, justifyContent: 'center' }}>
-            <input value={renameVal} onChange={e => setRenameVal(e.target.value)} onKeyDown={e => { if (e.key === 'Enter') doRename() }} autoFocus
-              style={{ padding: '4px 10px', fontSize: 18, fontWeight: 600, borderRadius: 6, background: 'var(--bg-input)', border: '1px solid var(--accent)', color: 'var(--text-primary)', outline: 'none', textAlign: 'center', width: 220 }} />
-            <button onClick={doRename} style={{ padding: '4px 10px', fontSize: 12, cursor: 'pointer', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 4 }}>✓</button>
+        {/* 工具栏 */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, padding: '4px 16px', flexWrap: 'wrap' }}>
+          <button onClick={() => { setBuilderVisible(!builderVisible); setMetricVisible(false) }} style={{
+            padding: '4px 12px', fontSize: 12, cursor: 'pointer',
+            background: 'var(--bg-input)', border: '1px solid var(--border-color)',
+            borderRadius: 6, color: 'var(--text-muted)',
+          }}>
+            {builderVisible ? '− 收起' : '+ 添加图表'}
+          </button>
+          <button onClick={() => { setMetricVisible(!metricVisible); setBuilderVisible(false) }} style={{
+            padding: '4px 12px', fontSize: 12, cursor: 'pointer',
+            background: 'var(--bg-input)', border: '1px solid var(--border-color)',
+            borderRadius: 6, color: 'var(--text-muted)',
+          }}>
+            {metricVisible ? '− 收起' : '+ 添加指标'}
+          </button>
+          <button onClick={toggleFullscreen} style={{
+            padding: '4px 12px', fontSize: 12, cursor: 'pointer',
+            background: 'var(--bg-input)', border: '1px solid var(--border-color)',
+            borderRadius: 6, color: 'var(--text-muted)',
+          }}>
+            {isFullscreen ? '⛶ 退出全屏' : '⛶ 全屏'}
+          </button>
+        </div>
+
+        {/* 图表构建器 */}
+        {builderVisible && (
+          <div style={{ margin: '4px 16px 8px', padding: 12, background: 'var(--bg-card)', border: '1px solid var(--border-color)', borderRadius: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'end' }}>
+            <div><Label>主表</Label>
+              <select value={builderForm.table} onChange={e => { setBuilderForm(f => ({ ...f, table: e.target.value, xCol: '', yCol: '' })); loadColumns(e.target.value) }} style={selectStyle}>
+                <option value="">选择表</option>
+                {tables.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div><Label>X 轴</Label>
+              <select value={builderForm.xCol} onChange={e => setBuilderForm(f => ({ ...f, xCol: e.target.value }))} style={selectStyle}>
+                <option value="">选择列</option>
+                {columns.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+              </select>
+            </div>
+            <div><Label>Y 轴 / 聚合</Label>
+              <select value={builderForm.yCol} onChange={e => setBuilderForm(f => ({ ...f, yCol: e.target.value }))} style={selectStyle}>
+                <option value="">选择列</option>
+                {columns.map(c => {
+                  return <option key={c.name} value={c.name}>{c.name}</option>
+                })}
+                <option value="COUNT(*)">COUNT(*)</option>
+                <option value="SUM(*)">SUM</option>
+                <option value="AVG(*)">AVG</option>
+              </select>
+            </div>
+            <div><Label>聚合方式</Label>
+              <input value={builderForm.aggFunc} onChange={e => setBuilderForm(f => ({ ...f, aggFunc: e.target.value }))} placeholder="如 SUM, AVG..." style={{ ...smallInputStyle, width: 80 }} />
+            </div>
+            <div><Label>图表类型</Label>
+              <select value={builderForm.chartType} onChange={e => setBuilderForm(f => ({ ...f, chartType: e.target.value }))} style={selectStyle}>
+                <option value="bar">柱状图</option>
+                <option value="line">折线图</option>
+                <option value="pie">饼图</option>
+                <option value="scatter">散点图</option>
+              </select>
+            </div>
+            <div><Label>JOIN 表</Label>
+              <select value={builderForm.joinTable} onChange={e => setBuilderForm(f => ({ ...f, joinTable: e.target.value }))} style={selectStyle}>
+                <option value="">无</option>
+                {tables.filter(t => t !== builderForm.table).map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div><Label>JOIN ON</Label>
+              <input value={builderForm.joinOn} onChange={e => setBuilderForm(f => ({ ...f, joinOn: e.target.value }))} placeholder="t1.col = t2.col" style={smallInputStyle} />
+            </div>
+            <div><Label>标题</Label>
+              <input value={builderForm.title} onChange={e => setBuilderForm(f => ({ ...f, title: e.target.value }))} placeholder="可选" style={smallInputStyle} />
+            </div>
+            <button onClick={addCustomChart} disabled={!builderForm.table || !builderForm.xCol || !builderForm.yCol} style={{
+              padding: '6px 16px', fontSize: 12, borderRadius: 6, border: 'none',
+              background: builderForm.table && builderForm.xCol && builderForm.yCol ? 'var(--accent)' : 'var(--bg-hover)',
+              color: builderForm.table && builderForm.xCol && builderForm.yCol ? '#fff' : 'var(--text-muted)',
+              cursor: builderForm.table && builderForm.xCol && builderForm.yCol ? 'pointer' : 'not-allowed',
+            }}>添加</button>
+            <button onClick={() => { setBuilderVisible(false); setBuilderForm({ table: '', xCol: '', yCol: '', chartType: 'bar', title: '', joinTable: '', joinOn: '', aggFunc: '' }) }}
+              style={{ padding: '6px 16px', fontSize: 12, borderRadius: 6, border: '1px solid var(--border-color)', background: 'var(--bg-input)', color: 'var(--text-muted)', cursor: 'pointer' }}>取消</button>
           </div>
-        ) : (
-          <h2 style={{ fontSize: 20, fontWeight: 700, margin: 0, cursor: 'pointer', color: 'var(--text-primary)', letterSpacing: '-0.02em' }}
-            onClick={() => { setRenameVal(active.name); setRenaming(true) }}>
-            {active.name}
-          </h2>
+        )}
+
+        {/* 指标构建器 */}
+        {metricVisible && (
+          <div style={{ margin: '4px 16px 8px', padding: 12, background: 'var(--bg-card)', border: '1px solid var(--border-color)', borderRadius: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'end' }}>
+            <div><Label>表</Label>
+              <select value={metricForm.table} onChange={e => { setMetricForm(f => ({ ...f, table: e.target.value, column: '' })); loadColumns(e.target.value) }} style={selectStyle}>
+                <option value="">选择表</option>
+                {tables.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div><Label>列</Label>
+              <select value={metricForm.column} onChange={e => setMetricForm(f => ({ ...f, column: e.target.value }))} style={selectStyle}>
+                <option value="">*</option>
+                {columns.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
+              </select>
+            </div>
+            <div><Label>聚合</Label>
+              <select value={metricForm.aggFunc} onChange={e => setMetricForm(f => ({ ...f, aggFunc: e.target.value }))} style={selectStyle}>
+                <option value="COUNT">COUNT</option>
+                <option value="SUM">SUM</option>
+                <option value="AVG">AVG</option>
+                <option value="MAX">MAX</option>
+                <option value="MIN">MIN</option>
+              </select>
+            </div>
+            <div><Label>过滤条件（可选）</Label>
+              <input value={metricForm.filter} onChange={e => setMetricForm(f => ({ ...f, filter: e.target.value }))} placeholder="如 status='已完成'" style={smallInputStyle} />
+            </div>
+            <div><Label>标题</Label>
+              <input value={metricForm.title} onChange={e => setMetricForm(f => ({ ...f, title: e.target.value }))} placeholder="可选" style={smallInputStyle} />
+            </div>
+            <button onClick={addMetric} disabled={!metricForm.table} style={{
+              padding: '6px 16px', fontSize: 12, borderRadius: 6, border: 'none',
+              background: metricForm.table ? 'var(--accent)' : 'var(--bg-hover)',
+              color: metricForm.table ? '#fff' : 'var(--text-muted)',
+              cursor: metricForm.table ? 'pointer' : 'not-allowed',
+            }}>添加指标</button>
+            <button onClick={() => { setMetricVisible(false); setMetricForm({ table: '', column: '', aggFunc: 'COUNT', filter: '', title: '' }) }}
+              style={{ padding: '6px 16px', fontSize: 12, borderRadius: 6, border: '1px solid var(--border-color)', background: 'var(--bg-input)', color: 'var(--text-muted)', cursor: 'pointer' }}>取消</button>
+          </div>
         )}
       </div>
 
-      {/* 统一改色 + 容器透明度 + 撤销栈 */}
-      {items.length > 0 && (
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 8, flexWrap: 'wrap' }}>
-          {/* 配色选择 */}
-          <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>🎨 统一配色:</span>
-          <select value={previewColor ?? ''} onChange={e => handleThemeSelect(e.target.value)} style={{ padding: '3px 8px', fontSize: 12, borderRadius: 6, background: 'var(--bg-input)', border: '1px solid var(--border-color)', color: 'var(--text-primary)', outline: 'none' }}>
-            <option value="">——</option>
-            {COLOR_SCHEMES.map((s, i) => (
-              <option key={s.name} value={i}>{s.name}</option>
-            ))}
-          </select>
-
-          {/* 容器透明度滑块 */}
-          <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 4 }}>🔲 透明度:</span>
-          <input type="range" min="0" max="100"
-            value={Math.round((previewOpacity ?? savedOpacity) * 100)}
-            onChange={e => setPreviewOpacity(Number(e.target.value) / 100)}
-            style={{ width: 80, cursor: 'pointer', accentColor: 'var(--accent)' }} />
-          <span style={{ fontSize: 11, color: 'var(--text-muted)', minWidth: 32 }}>{Math.round((previewOpacity ?? savedOpacity) * 100)}%</span>
-
-          {/* 确定 / 取消 / 恢复上一步 */}
-          {(previewColor !== null || previewOpacity !== null) && (
-            <button onClick={applyTheme} style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 6 }}>
-              确定
-            </button>
-          )}
-          {(previewColor !== null || previewOpacity !== null) && (
-            <button onClick={cancelPreview} style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>
-              取消
-            </button>
-          )}
-          {themeStack.length > 0 && previewColor === null && previewOpacity === null && (
-            <button onClick={undoThemeStep} title="从撤销栈恢复上一步配色和透明度设置"
-              style={{ padding: '3px 12px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>
-              ↩ 恢复上一步{themeStack.length > 1 ? `(${themeStack.length})` : ''}
-            </button>
-          )}
-        </div>
-      )}
-
-      {/* 工具栏 */}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-        <button onClick={() => { setBuilderVisible(!builderVisible); setMetricVisible(false) }} style={{
-          padding: '4px 12px', fontSize: 12, cursor: 'pointer',
-          background: 'var(--bg-input)', border: '1px solid var(--border-color)',
-          borderRadius: 6, color: 'var(--text-muted)',
-        }}>
-          {builderVisible ? '− 收起' : '+ 添加图表'}
-        </button>
-        <button onClick={() => { setMetricVisible(!metricVisible); setBuilderVisible(false) }} style={{
-          padding: '4px 12px', fontSize: 12, cursor: 'pointer',
-          background: 'var(--bg-input)', border: '1px solid var(--border-color)',
-          borderRadius: 6, color: 'var(--text-muted)',
-        }}>
-          {metricVisible ? '− 收起' : '+ 添加指标'}
-        </button>
-        <button onClick={toggleFullscreen} style={{
-          padding: '4px 12px', fontSize: 12, cursor: 'pointer',
-          background: 'var(--bg-input)', border: '1px solid var(--border-color)',
-          borderRadius: 6, color: 'var(--text-muted)',
-        }}>
-          {isFullscreen ? '⛶ 退出全屏' : '⛶ 全屏'}
-        </button>
-      </div>
-
-      {/* 图表构建器 */}
-      {builderVisible && (
-        <div style={{ marginBottom: 12, padding: 12, background: 'var(--bg-card)', border: '1px solid var(--border-color)', borderRadius: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'end' }}>
-          <div><Label>主表</Label>
-            <select value={builderForm.table} onChange={e => { setBuilderForm(f => ({ ...f, table: e.target.value, xCol: '', yCol: '' })); loadColumns(e.target.value) }} style={selectStyle}>
-              <option value="">选择表</option>
-              {tables.map(t => <option key={t} value={t}>{t}</option>)}
-            </select>
-          </div>
-          <div><Label>X 轴</Label>
-            <select value={builderForm.xCol} onChange={e => setBuilderForm(f => ({ ...f, xCol: e.target.value }))} style={selectStyle}>
-              <option value="">选择列</option>
-              {columns.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
-            </select>
-          </div>
-          <div><Label>Y 轴 / 聚合</Label>
-            <select value={builderForm.yCol} onChange={e => setBuilderForm(f => ({ ...f, yCol: e.target.value }))} style={selectStyle}>
-              <option value="">选择列</option>
-              {columns.map(c => {
-                return <option key={c.name} value={c.name}>{c.name}</option>
-              })}
-              <option value="COUNT(*)">COUNT(*)</option>
-              <option value="SUM(*)">SUM</option>
-              <option value="AVG(*)">AVG</option>
-            </select>
-          </div>
-          <div><Label>聚合方式</Label>
-            <input value={builderForm.aggFunc} onChange={e => setBuilderForm(f => ({ ...f, aggFunc: e.target.value }))} placeholder="如 SUM, AVG..." style={{ ...smallInputStyle, width: 80 }} />
-          </div>
-          <div><Label>图表类型</Label>
-            <select value={builderForm.chartType} onChange={e => setBuilderForm(f => ({ ...f, chartType: e.target.value }))} style={selectStyle}>
-              <option value="bar">柱状图</option>
-              <option value="line">折线图</option>
-              <option value="pie">饼图</option>
-              <option value="scatter">散点图</option>
-            </select>
-          </div>
-          <div><Label>JOIN 表</Label>
-            <select value={builderForm.joinTable} onChange={e => setBuilderForm(f => ({ ...f, joinTable: e.target.value }))} style={selectStyle}>
-              <option value="">无</option>
-              {tables.filter(t => t !== builderForm.table).map(t => <option key={t} value={t}>{t}</option>)}
-            </select>
-          </div>
-          <div><Label>JOIN ON</Label>
-            <input value={builderForm.joinOn} onChange={e => setBuilderForm(f => ({ ...f, joinOn: e.target.value }))} placeholder="t1.col = t2.col" style={smallInputStyle} />
-          </div>
-          <div><Label>标题</Label>
-            <input value={builderForm.title} onChange={e => setBuilderForm(f => ({ ...f, title: e.target.value }))} placeholder="可选" style={smallInputStyle} />
-          </div>
-          <button onClick={addCustomChart} disabled={!builderForm.table || !builderForm.xCol || !builderForm.yCol} style={{
-            padding: '6px 16px', fontSize: 12, borderRadius: 6, border: 'none',
-            background: builderForm.table && builderForm.xCol && builderForm.yCol ? 'var(--accent)' : 'var(--bg-hover)',
-            color: builderForm.table && builderForm.xCol && builderForm.yCol ? '#fff' : 'var(--text-muted)',
-            cursor: builderForm.table && builderForm.xCol && builderForm.yCol ? 'pointer' : 'not-allowed',
-          }}>添加</button>
-          <button onClick={() => { setBuilderVisible(false); setBuilderForm({ table: '', xCol: '', yCol: '', chartType: 'bar', title: '', joinTable: '', joinOn: '', aggFunc: '' }) }}
-            style={{ padding: '6px 16px', fontSize: 12, borderRadius: 6, border: '1px solid var(--border-color)', background: 'var(--bg-input)', color: 'var(--text-muted)', cursor: 'pointer' }}>取消</button>
-        </div>
-      )}
-
-      {/* 指标构建器 */}
-      {metricVisible && (
-        <div style={{ marginBottom: 12, padding: 12, background: 'var(--bg-card)', border: '1px solid var(--border-color)', borderRadius: 8, display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'end' }}>
-          <div><Label>表</Label>
-            <select value={metricForm.table} onChange={e => { setMetricForm(f => ({ ...f, table: e.target.value, column: '' })); loadColumns(e.target.value) }} style={selectStyle}>
-              <option value="">选择表</option>
-              {tables.map(t => <option key={t} value={t}>{t}</option>)}
-            </select>
-          </div>
-          <div><Label>列</Label>
-            <select value={metricForm.column} onChange={e => setMetricForm(f => ({ ...f, column: e.target.value }))} style={selectStyle}>
-              <option value="">*</option>
-              {columns.map(c => <option key={c.name} value={c.name}>{c.name}</option>)}
-            </select>
-          </div>
-          <div><Label>聚合</Label>
-            <select value={metricForm.aggFunc} onChange={e => setMetricForm(f => ({ ...f, aggFunc: e.target.value }))} style={selectStyle}>
-              <option value="COUNT">COUNT</option>
-              <option value="SUM">SUM</option>
-              <option value="AVG">AVG</option>
-              <option value="MAX">MAX</option>
-              <option value="MIN">MIN</option>
-            </select>
-          </div>
-          <div><Label>过滤条件（可选）</Label>
-            <input value={metricForm.filter} onChange={e => setMetricForm(f => ({ ...f, filter: e.target.value }))} placeholder="如 status='已完成'" style={smallInputStyle} />
-          </div>
-          <div><Label>标题</Label>
-            <input value={metricForm.title} onChange={e => setMetricForm(f => ({ ...f, title: e.target.value }))} placeholder="可选" style={smallInputStyle} />
-          </div>
-          <button onClick={addMetric} disabled={!metricForm.table} style={{
-            padding: '6px 16px', fontSize: 12, borderRadius: 6, border: 'none',
-            background: metricForm.table ? 'var(--accent)' : 'var(--bg-hover)',
-            color: metricForm.table ? '#fff' : 'var(--text-muted)',
-            cursor: metricForm.table ? 'pointer' : 'not-allowed',
-          }}>添加指标</button>
-          <button onClick={() => { setMetricVisible(false); setMetricForm({ table: '', column: '', aggFunc: 'COUNT', filter: '', title: '' }) }}
-            style={{ padding: '6px 16px', fontSize: 12, borderRadius: 6, border: '1px solid var(--border-color)', background: 'var(--bg-input)', color: 'var(--text-muted)', cursor: 'pointer' }}>取消</button>
+      {/* KPI 指标栏：单值指标聚合为横向卡片条 */}
+      {metricItems.length > 0 && (
+        <div className="kpi-metric-card" style={{ display: 'flex', gap: 12, padding: '0 16px 8px', flexShrink: 0 }}>
+          {metricItems.map(item => (
+            <div key={item.id} style={{
+              flex: 1,
+              background: 'var(--bg-card)',
+              borderRadius: 10,
+              padding: '12px 16px',
+              display: 'flex',
+              flexDirection: 'column',
+              position: 'relative',
+              boxShadow: 'var(--shadow)',
+            }}>
+              {/* 删除按钮（悬停显示） */}
+              <div className="dashboard-card-actions" style={{
+                position: 'absolute', top: 6, right: 8,
+                opacity: 0, transition: 'opacity 0.2s ease',
+              }}>
+                <span onClick={() => removeItem(item.id)} style={{ cursor: 'pointer', color: '#e74c3c', fontSize: 14 }}>✕</span>
+              </div>
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4, fontWeight: 500 }}>{item.title}</div>
+              <div style={{ fontSize: 28, fontWeight: 600, color: 'var(--text-primary)', letterSpacing: '-0.03em' }}>
+                {item.metricValue}
+              </div>
+            </div>
+          ))}
         </div>
       )}
 
       {/* 空状态提示 */}
       {items.length === 0 && !builderVisible && !metricVisible && (
-        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '60%', color: 'var(--text-muted)', fontSize: 14 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--text-muted)', fontSize: 14 }}>
           <div style={{ fontSize: 32, marginBottom: 12 }}>📊</div>
           <div>数据大屏为空</div>
           <div style={{ fontSize: 12, marginTop: 4 }}>点击上方「+ 添加图表」或「+ 添加指标」创建内容</div>
@@ -689,92 +764,131 @@ function DashboardPanel() {
         </div>
       )}
 
-      {/* Grid 内容 */}
-      {items.length > 0 && (
-        <GridLayout
-          className="layout"
-          layout={layout}
-          cols={12}
-          rowHeight={60}
-          width={containerRef.current?.clientWidth || 1200}
-          onLayoutChange={onLayoutChange}
-          onResize={onGridResize}
-          draggableHandle=".drag-handle"
-          isResizable={true}
-          compactType="vertical"
-          preventCollision={false}
-          autoSize={true}
-        >
-          {items.map(item => {
-            // 卡片背景透明度
-            const effectiveOpacity = previewOpacity ?? savedOpacity ?? 1
-            const bgCardVar = getComputedStyle(document.documentElement).getPropertyValue('--bg-card').trim()
-            const cardBg = effectiveOpacity < 1 ? hexToRgba(bgCardVar || '#ffffff', effectiveOpacity) : 'var(--bg-card)'
+      {/* 图表区 Grid（3 列布局，动态行高适配） */}
+      {chartItems.length > 0 && (
+        <div className="dashboard-grid" style={{ flex: 1, overflow: 'hidden', padding: '0 16px 16px' }}>
+          <GridLayout
+            className="layout"
+            layout={chartLayout}
+            cols={3}
+            rowHeight={rowHeight}
+            width={Math.max(dashSize.w - 32, 300)}
+            onLayoutChange={(newChartLayout) => {
+              // 合并指标布局（不在 Grid 中的）与图表新布局
+              const metricLayoutEntries = layout.filter(l => metricIds.has(l.i))
+              const fullLayout = [...metricLayoutEntries, ...newChartLayout]
+              setLayout(fullLayout)
+              syncDashboards(fullLayout, items)
+            }}
+            onResize={onGridResize}
+            draggableHandle=".drag-handle"
+            isResizable={true}
+            compactType="vertical"
+            preventCollision={false}
+            autoSize={false}
+          >
+            {chartItems.map(item => {
+              // 卡片背景透明度
+              const effectiveOpacity = previewOpacity ?? savedOpacity ?? 1
+              const bgCardVar = getComputedStyle(document.documentElement).getPropertyValue('--bg-card').trim()
+              const cardBg = effectiveOpacity < 1 ? hexToRgba(bgCardVar || '#252830', effectiveOpacity) : 'var(--bg-card)'
 
-            if (item.type === 'metric') {
+              // 计算高度级别
+              const itemLayout = chartLayout.find(l => l.i === item.id)
+              const h = itemLayout?.h ?? 4
+              const heightLevel = h <= 2 ? 'compact' : h >= 5 ? 'spacious' : 'normal'
+
+              const opt = makeChartOption(item, heightLevel)
+              const isEditorOpen = item.chartEditorOpen
+              const effectiveColor = previewColor ?? item.manualColor ?? 0
+
+              // 图表高度：减去标题栏和按钮（约 50px）
+              const chartHeight = Math.max(rowHeight * h - 50, 60)
+
               return (
-                <div key={item.id} style={{ borderRadius: 12, background: cardBg, border: '1px solid var(--border-color)', padding: 16, display: 'flex', flexDirection: 'column' }}>
-                  <div className="drag-handle" style={{ fontSize: 12, color: 'var(--text-muted)', cursor: 'grab', display: 'flex', justifyContent: 'space-between', userSelect: 'none' }}>
-                    <span>{item.title}</span>
-                    <span onClick={() => removeItem(item.id)} style={{ cursor: 'pointer', color: '#e74c3c' }}>✕</span>
+                <div key={item.id} data-echart-id={item.id}
+                  className="dashboard-grid-card"
+                  style={{
+                    background: cardBg,
+                    borderRadius: 10,
+                    display: 'flex',
+                    flexDirection: 'column',
+                    position: 'relative',
+                    boxShadow: 'var(--shadow)',
+                    overflow: 'hidden',
+                  }}
+                >
+                  {/* 标题栏（拖拽手柄） */}
+                  <div className="drag-handle" style={{
+                    padding: '8px 12px',
+                    fontSize: 12,
+                    color: 'var(--text-secondary)',
+                    cursor: 'grab',
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    alignItems: 'center',
+                    borderBottom: '1px solid var(--border-color)',
+                    userSelect: 'none',
+                    flexShrink: 0,
+                  }}>
+                    <span style={{ fontWeight: 500 }}>{item.title}</span>
+                    {/* 操作按钮（悬停显示） */}
+                    <div className="dashboard-card-actions" style={{
+                      display: 'flex', gap: 6, alignItems: 'center',
+                      opacity: 0, transition: 'opacity 0.2s ease',
+                    }}>
+                      <button onClick={() => setItems(prev => prev.map(it => it.id === item.id ? { ...it, chartEditorOpen: !it.chartEditorOpen } : it))}
+                        style={{ padding: '2px 8px', fontSize: 10, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 4, color: 'var(--text-muted)' }}>
+                        📊 修改
+                      </button>
+                      <span onClick={() => removeItem(item.id)} style={{ cursor: 'pointer', color: '#e74c3c', fontSize: 13 }}>✕</span>
+                    </div>
                   </div>
-                  <div style={{ fontSize: 28, fontWeight: 500, color: 'var(--text-primary)', marginTop: 8 }}>{item.metricValue}</div>
+
+                  {/* 图表内容 */}
+                  <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+                    {opt ? (
+                      <ReactEChartsCore
+                        key={item.id + '_' + resizeVer}
+                        option={opt}
+                        style={{ height: chartHeight, width: '100%' }}
+                        opts={{ renderer: 'canvas' }}
+                      />
+                    ) : item.result ? (
+                      <div style={{ color: 'var(--text-primary)', fontSize: 18, fontWeight: 500 }}>
+                        {JSON.stringify(item.result[0]?.[Object.keys(item.result[0])[1]] ?? item.result[0]?.[Object.keys(item.result[0])[0]] ?? '—')}
+                      </div>
+                    ) : (
+                      <div style={{ color: 'var(--text-muted)', fontSize: 12 }}>加载中...</div>
+                    )}
+                  </div>
+
+                  {/* 图表编辑面板（展开时） */}
+                  {isEditorOpen && (
+                    <div style={{ flexShrink: 0, padding: 8, background: 'var(--bg-secondary)', borderTop: '1px solid var(--border-color)', fontSize: 10 }}>
+                      <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
+                        <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>图表:</span>
+                        <select value={item.chartType || 'bar'} onChange={e => setItems(prev => prev.map(it => it.id === item.id ? { ...it, chartType: e.target.value } : it))} style={{ ...selStyle2, flex: 1 }}>
+                          {CHART_TYPES.map(t => <option key={t.key} value={t.key}>{t.label}</option>)}
+                        </select>
+                      </div>
+                      <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 4 }}>
+                        {COLOR_SCHEMES.map((s, ci) => (
+                          <button key={s.name} onClick={() => setItems(prev => prev.map(it => it.id === item.id ? { ...it, manualColor: ci } : it))}
+                            style={{ width: 22, height: 16, borderRadius: 3, cursor: 'pointer', border: effectiveColor === ci ? '2px solid var(--accent)' : '1px solid var(--border-color)', background: `linear-gradient(90deg, ${s.colors.slice(0, 4).join(', ')})`, padding: 0 }} title={s.name} />
+                        ))}
+                      </div>
+                      <button onClick={() => setItems(prev => prev.map(it => it.id === item.id ? { ...it, chartEditorOpen: false } : it))}
+                        style={{ padding: '3px 12px', fontSize: 10, cursor: 'pointer', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 4 }}>
+                        应用
+                      </button>
+                    </div>
+                  )}
                 </div>
               )
-            }
-
-            // 计算高度级别：从 layout 中取 h 值
-            const itemLayout = layout.find(l => l.i === item.id)
-            const h = itemLayout?.h ?? 4
-            const heightLevel = h <= 2 ? 'compact' : h >= 5 ? 'spacious' : 'normal'
-
-            const opt = makeChartOption(item, heightLevel)
-            const isEditorOpen = item.chartEditorOpen
-            const effectiveColor = item.manualColor ?? previewColor ?? 0
-            return (
-              <div key={item.id} data-echart-id={item.id} style={{ borderRadius: 12, background: cardBg, border: '1px solid var(--border-color)', padding: 12, display: 'flex', flexDirection: 'column' }}>
-                <div className="drag-handle" style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 4, cursor: 'grab', userSelect: 'none', display: 'flex', justifyContent: 'space-between' }}>
-                  <span>{item.title}</span>
-                  <span onClick={() => removeItem(item.id)} style={{ cursor: 'pointer', color: '#e74c3c' }}>✕</span>
-                </div>
-                {/* 操作按钮 */}
-                <div style={{ display: 'flex', gap: 4, marginBottom: 6 }}>
-                  <button onClick={() => setItems(prev => prev.map(it => it.id === item.id ? { ...it, chartEditorOpen: !it.chartEditorOpen } : it))}
-                    style={{ padding: '2px 8px', fontSize: 10, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 4, color: 'var(--text-muted)' }}>
-                    📊 修改图表
-                  </button>
-                </div>
-                {opt
-                  ? <ReactEChartsCore key={item.id + '_' + resizeVer} option={opt} style={{ height: 200, width: '100%' }} opts={{ renderer: 'canvas' }} />
-                  : item.result
-                    ? <div style={{ color: 'var(--text-primary)', fontSize: 18, fontWeight: 500 }}>{JSON.stringify(item.result[0]?.[Object.keys(item.result[0])[1]] ?? item.result[0]?.[Object.keys(item.result[0])[0]] ?? '—')}</div>
-                    : <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: 12 }}>加载中...</div>
-                }
-                {/* 图表编辑面板 */}
-                {isEditorOpen && (
-                  <div style={{ marginTop: 8, padding: 8, background: 'var(--bg-secondary)', border: '1px solid var(--border-color)', borderRadius: 6, fontSize: 10 }}>
-                    <div style={{ display: 'flex', gap: 4, marginBottom: 4 }}>
-                      <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>图表:</span>
-                      <select value={item.chartType || 'bar'} onChange={e => setItems(prev => prev.map(it => it.id === item.id ? { ...it, chartType: e.target.value } : it))} style={{ ...selStyle2, flex: 1 }}>
-                        {CHART_TYPES.map(t => <option key={t.key} value={t.key}>{t.label}</option>)}
-                      </select>
-                    </div>
-                    <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap', marginBottom: 4 }}>
-                      {COLOR_SCHEMES.map((s, ci) => (
-                        <button key={s.name} onClick={() => setItems(prev => prev.map(it => it.id === item.id ? { ...it, manualColor: ci } : it))}
-                          style={{ width: 22, height: 16, borderRadius: 3, cursor: 'pointer', border: effectiveColor === ci ? '2px solid var(--accent)' : '1px solid var(--border-color)', background: `linear-gradient(90deg, ${s.colors.slice(0, 4).join(', ')})`, padding: 0 }} title={s.name} />
-                      ))}
-                    </div>
-                    <button onClick={() => setItems(prev => prev.map(it => it.id === item.id ? { ...it, chartEditorOpen: false } : it))}
-                      style={{ padding: '3px 12px', fontSize: 10, cursor: 'pointer', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 4 }}>
-                      应用
-                    </button>
-                  </div>
-                )}
-              </div>
-            )
-          })}
-        </GridLayout>
+            })}
+          </GridLayout>
+        </div>
       )}
 
       {/* 删除确认弹窗 */}
