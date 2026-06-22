@@ -158,9 +158,9 @@ SQL 执行失败 → search_similar_trace() → 检索 tracess/ 历史修正
 
 ### 7. 两级语义缓存 (core/cache.py)
 
-- **L1 精确缓存**：MD5 哈希匹配（使用标准化查询意图作为键）
-- **L2 语义缓存**：jieba 词频向量余弦相似度 > 0.95，缓存键基于 ConversationManager 标准化后的查询意图（非原始口语）
-- **缓存误命中防护**：不同意图的查询（如"黑龙江人口" vs "广东销售额"）因使用经过补全/标准化后的查询作为向量比较依据，不会错误命中同一缓存
+- **L1 精确缓存**：MD5 哈希匹配（使用标准化查询意图 + 结构化意图签名作为联合键）
+- **L2 语义缓存**：jieba 词频向量余弦相似度 > 0.95，且结构化签名（表名、字段、聚合函数、GROUP BY 标志）必须完全一致才命中
+- **缓存误命中防护**：不同意图的查询（如 `SUM(amount) WHERE province` 的签名 `A:SUM|F:amount|F:province` 与 `AVG(price)` 的签名 `A:AVG|F:price` 不同）不会交叉命中；返回缓存前还用 sqlglot 提取列名与 FieldResolver 匹配字段做交集验证
 - 缓存后端：Redis / fakeredis
 
 ### 8. 可视化系统
