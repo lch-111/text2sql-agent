@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 
 // 简易加密存储（浏览器环境，非高安全需求）
 function encrypt(text) {
@@ -20,6 +20,9 @@ export default function ToolsSidebar({ open, onToggle }) {
   const [statusMsg, setStatusMsg] = useState('')
   const [rememberMe, setRememberMe] = useState(false)
   const [dbType, setDbType] = useState('mysql')
+  // 文件上传状态
+  const [uploadProgress, setUploadProgress] = useState(null) // { step, message, percent } | null
+  const fileInputRef = useRef(null)
 
   // 恢复记住的密码
   useEffect(() => {
@@ -95,6 +98,94 @@ export default function ToolsSidebar({ open, onToggle }) {
     }
   }
 
+  // ---- 文件上传处理 ----
+  const [dragOver, setDragOver] = useState(false)
+
+  const handleFileSelect = (e) => {
+    const file = e.target.files?.[0]
+    if (file) uploadFile(file)
+    if (fileInputRef.current) fileInputRef.current.value = ''
+  }
+
+  const handleDrop = (e) => {
+    e.preventDefault()
+    setDragOver(false)
+    const file = e.dataTransfer?.files?.[0]
+    if (file) uploadFile(file)
+  }
+
+  const uploadFile = async (file) => {
+    const ext = file.name.split('.').pop()?.toLowerCase()
+    if (!['csv', 'xlsx', 'xls', 'pdf'].includes(ext)) {
+      setUploadProgress({ step: 'error', message: '不支持的文件格式', percent: 0 })
+      setTimeout(() => setUploadProgress(null), 3000)
+      return
+    }
+    const formData = new FormData()
+    formData.append('file', file)
+    setUploadProgress({ step: 'uploading', message: '上传中...', percent: 10 })
+
+    try {
+      // 使用 SSE 流式上传端点
+      const res = await fetch('/api/upload/stream', { method: 'POST', body: formData })
+      const reader = res.body?.getReader()
+      if (!reader) throw new Error('无法读取响应流')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let resultData = null
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        // 解析 SSE 事件
+        const lines = buffer.split('\n\n')
+        buffer = lines.pop() || ''
+        for (const block of lines) {
+          const lines2 = block.split('\n')
+          let eventType = '', dataStr = ''
+          for (const l of lines2) {
+            if (l.startsWith('event: ')) eventType = l.slice(7)
+            if (l.startsWith('data: ')) dataStr = l.slice(6)
+          }
+          if (!dataStr) continue
+          try {
+            const d = JSON.parse(dataStr)
+            if (eventType === 'progress') {
+              setUploadProgress({ step: d.step, message: d.message, percent: d.percent })
+            } else if (eventType === 'result') {
+              resultData = d
+              setUploadProgress({ step: 'done', message: `✅ 已导入 ${d.tables_created?.length || 0} 个表`, percent: 100 })
+            } else if (eventType === 'error') {
+              setUploadProgress({ step: 'error', message: `❌ ${d.error}`, percent: 0 })
+            }
+          } catch {}
+        }
+      }
+
+      if (resultData) {
+        // 触发事件通知聊天区刷新表
+        window.dispatchEvent(new CustomEvent('upload-complete', { detail: resultData }))
+      }
+      setTimeout(() => setUploadProgress(null), 4000)
+    } catch (e) {
+      // 降级到非流式上传
+      try {
+        const res2 = await fetch('/api/upload', { method: 'POST', body: formData })
+        const d2 = await res2.json()
+        if (d2.error) {
+          setUploadProgress({ step: 'error', message: `❌ ${d2.error}`, percent: 0 })
+        } else {
+          setUploadProgress({ step: 'done', message: `✅ 已导入 ${d2.tables_created?.length || 0} 个表`, percent: 100 })
+        }
+      } catch (e2) {
+        setUploadProgress({ step: 'error', message: `❌ ${e2.message}`, percent: 0 })
+      }
+      setTimeout(() => setUploadProgress(null), 4000)
+    }
+  }
+
   return (
     <div style={{ position: 'relative', display: 'flex' }}>
       <button onClick={onToggle} style={{
@@ -112,8 +203,30 @@ export default function ToolsSidebar({ open, onToggle }) {
       }}>
         <div style={{ width: 280, padding: '48px 16px 16px' }}>
           <Section title="📁 数据导入">
-            <div style={{ border: '2px dashed var(--border-color)', borderRadius: 12, padding: 24, textAlign: 'center', cursor: 'pointer', color: 'var(--text-muted)', fontSize: 12 }}>
-              📄 点击或拖拽上传<br />CSV / Excel / PDF
+            <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls,.pdf" onChange={handleFileSelect} style={{ display: 'none' }} />
+            <div onClick={() => fileInputRef.current?.click()}
+              onDragOver={e => { e.preventDefault(); setDragOver(true) }}
+              onDragLeave={() => setDragOver(false)}
+              onDrop={handleDrop}
+              style={{
+                border: `2px dashed ${dragOver ? 'var(--accent)' : 'var(--border-color)'}`,
+                borderRadius: 12, padding: 24, textAlign: 'center', cursor: 'pointer',
+                color: 'var(--text-muted)', fontSize: 12,
+                background: dragOver ? 'var(--bg-hover)' : 'transparent',
+                transition: 'all 0.2s',
+              }}>
+              {uploadProgress ? (
+                <div>
+                  <div style={{ marginBottom: 6 }}>{uploadProgress.message}</div>
+                  {uploadProgress.percent > 0 && uploadProgress.percent < 100 && (
+                    <div style={{ width: '100%', height: 4, background: 'var(--bg-input)', borderRadius: 2, overflow: 'hidden' }}>
+                      <div style={{ width: `${uploadProgress.percent}%`, height: '100%', background: 'var(--accent)', borderRadius: 2, transition: 'width 0.3s' }} />
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <>📄 点击或拖拽上传<br />CSV / Excel / PDF</>
+              )}
             </div>
           </Section>
 

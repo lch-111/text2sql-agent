@@ -13,17 +13,5 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
-    rollupOptions: {
-      external: [
-        'react-draggable',
-        'react-grid-layout',
-      ],
-      output: {
-        globals: {
-          'react-draggable': 'ReactDraggable',
-          'react-grid-layout': 'ReactGridLayout',
-        },
-      },
-    },
   },
 })

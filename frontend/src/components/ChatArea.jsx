@@ -115,55 +115,39 @@ function saveToHistory(q, msg, messages, convId) {
     const history = JSON.parse(localStorage.getItem('chat_history') || '[]')
     const title = shortTitle(q)
 
-    // ---- 历史去重 ----
-    // 检查最后 5 条历史中是否有相似问题
-    const recent = history.slice(-5)
-    let deduped = false
-    for (const entry of recent) {
-      if (!entry.question) continue
-      const sim = textSimilarity(q, entry.question)
-      if (sim > 0.85) {
-        // 相似问题：保留结果更好（有数据 > 行数多 > 耗时近）的条目
-        const currentRows = msg.result?.length || 0
-        const existingRows = entry.resultCount || 0
-        if (currentRows >= existingRows && msg.sql) {
-          // 当前结果更好，更新条目
-          entry.question = q
-          entry.preview = title
-          entry.sql = msg.sql || ''
-          entry.resultSummary = msg.result ? msg.result.length + ' 条结果' : ''
-          entry.resultCount = currentRows
-        }
-        // 保留更优结果后标记已去重
-        deduped = true
-        break
-      }
-    }
+    // 查找当前 convId 是否已有历史条目
+    const existingIdx = history.findIndex(e => e.id === convId)
 
-    // 只在非去重时才更新最后一条
-    if (!deduped && history.length > 0) {
-      const last = history[history.length - 1]
-      last.question = q
-      last.preview = title
-      last.sql = msg.sql || ''
-      last.resultSummary = msg.result ? msg.result.length + ' 条结果' : ''
-      last.resultCount = msg.result?.length || 0
+    if (existingIdx >= 0) {
+      // 更新已有条目
+      const entry = history[existingIdx]
+      entry.question = q
+      entry.preview = title
+      entry.sql = msg.sql || ''
+      entry.resultSummary = msg.result ? msg.result.length + ' 条结果' : ''
+      entry.resultCount = msg.result?.length || 0
+    } else {
+      // 新建历史条目（首次发消息时自动创建）
+      history.push({
+        id: convId,
+        question: q,
+        preview: title,
+        time: new Date().toLocaleString('zh-CN'),
+        sql: msg.sql || '',
+        resultSummary: msg.result ? msg.result.length + ' 条结果' : '',
+        resultCount: msg.result?.length || 0,
+      })
     }
-    if (!deduped) {
-      localStorage.setItem('chat_history', JSON.stringify(history))
-    }
+    localStorage.setItem('chat_history', JSON.stringify(history))
 
     // 保存完整消息到 chat_messages_{convId}（会话隔离）
-    if (messages && messages.length > 0) {
-      if (convId) {
-        try { localStorage.setItem('chat_messages_' + convId, JSON.stringify(messages)) } catch {}
-      } else if (history.length > 0) {
-        const last = history[history.length - 1]
-        try { localStorage.setItem('chat_messages_' + last.id, JSON.stringify(messages)) } catch {}
-      }
+    if (messages && messages.length > 0 && convId) {
+      try { localStorage.setItem('chat_messages_' + convId, JSON.stringify(messages)) } catch {}
       // 同时保存到通用键作为降级
       try { localStorage.setItem('chat_messages', JSON.stringify(messages)) } catch {}
     }
+    // 持久化当前活跃对话 ID
+    try { localStorage.setItem('chat_active_conv', convId || '') } catch {}
     window.dispatchEvent(new Event('chat-history-changed'))
   } catch {}
 }
@@ -182,12 +166,12 @@ export default function ChatArea(props) {
   const [input, setInput] = useState('')
   // ---- 消息状态改为 conversations 映射（按对话 ID 隔离）----
   const [conversations, setConversations] = useState(() => {
-    const initId = props.convId
+    const initId = String(props.convId || '')
     const saved = loadMessages(initId)
     return { [initId]: saved }
   })
-  // 当前 UI 显示的对话 ID
-  const [activeConvId, setActiveConvId] = useState(props.convId)
+  // 当前 UI 显示的对话 ID（始终为字符串，与后端 cid 类型一致）
+  const [activeConvId, setActiveConvId] = useState(() => String(props.convId || ''))
   // 当前正在 SSE 流式输出的对话 ID（ref，不触发渲染）
   const streamingConvIdRef = useRef(null)
   const sessionIdRef = useRef(0)
@@ -202,12 +186,12 @@ export default function ChatArea(props) {
   const [detectedType, setDetectedType] = useState('chart') // 'metric' | 'chart' 自动检测结果
   const [detectingType, setDetectingType] = useState(false) // 是否正在检测中
   const [manualType, setManualType] = useState(null) // null=使用自动检测, 'metric'|'chart'=手动覆盖
+  const [chartName, setChartName] = useState('') // 添加到大屏的图表名称（可编辑）
   const [thinkingMode, setThinkingMode] = useState(() => {
     try { return localStorage.getItem('thinking_mode') || 'normal' } catch { return 'normal' }
   })
-  const [mascotStatus, setMascotStatus] = useState('idle') // 'idle' | 'thinking'
   const chatAreaRef = useRef(null)
-  const loadingBubbleRef = useRef(null)
+  const inputAreaRef = useRef(null)
   const loadingSteps = ['🔄 分析查询意图...', '📋 检索数据库结构...', '📝 生成 SQL...', '⚡ 执行查询...']
 
   // 持久化思考模式偏好
@@ -216,14 +200,16 @@ export default function ChatArea(props) {
   }, [thinkingMode])
 
   // 加载大屏列表（从 dashboard_manager localStorage）
-  useEffect(() => {
+  const refreshDashboardList = () => {
     try {
-      const mgr = JSON.parse(localStorage.getItem('dashboard_manager') || '{}')
-      const screens = Object.keys(mgr).filter(k => k !== 'current')
+      const mgr = JSON.parse(localStorage.getItem('dashboard_manager') || 'null')
+      const screens = Array.isArray(mgr) ? mgr.map(d => d.name) : []
       setDashboardList(screens)
       if (screens.length > 0) setSelectedDashboard(screens[0])
     } catch {}
-  }, [])
+  }
+
+  useEffect(() => { refreshDashboardList() }, [])
   const msgEndRef = useRef(null)
 
   // 持久化所有对话消息到 localStorage（每个对话独立键名）
@@ -238,14 +224,6 @@ export default function ChatArea(props) {
     fetch('/api/db/suggest-questions').then(r => r.json()).then(d => { if (!c && d.questions?.length) setSuggestions(d.questions) }).catch(() => {})
     return () => { c = true }
   }, [])
-
-  const refreshSuggestions = async () => {
-    try {
-      const r = await fetch('/api/db/suggest-questions?refresh=' + Date.now())
-      const d = await r.json()
-      if (d.questions?.length) setSuggestions(d.questions)
-    } catch {}
-  }
 
   // ---- 对话切换（来自历史侧栏） + 新建对话 ----
   useEffect(() => {
@@ -281,23 +259,25 @@ export default function ChatArea(props) {
     }
   }, [])
 
-  // 确认弹窗打开时，自动调用后端检测类型（指标/图表）
+  // 确认弹窗打开时，自动调用后端检测类型 + 获取图表名称
   useEffect(() => {
     if (!confirmModal) return
     const msg = confirmModal.msg
     setDetectingType(true)
     setManualType(null)
     setDetectedType('chart')
+    setChartName('')
 
     if (!msg.sql) {
-      // 无 SQL 时降级为结果形状判断
       const fallback = (!msg.result || msg.result.length === 0) ? 'chart' :
         (msg.result.length === 1 && Object.keys(msg.result[0]).length === 1) ? 'metric' : 'chart'
       setDetectedType(fallback)
       setDetectingType(false)
+      setChartName(shortTitle(msg.userQuestion || '') || '查询结果')
       return
     }
 
+    // 检测类型
     fetch('/api/dashboard/detect-type', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -309,45 +289,77 @@ export default function ChatArea(props) {
         setDetectingType(false)
       })
       .catch(() => {
-        // 网络异常时降级为结果形状判断
         const fallback = (!msg.result || msg.result.length === 0) ? 'chart' :
           (msg.result.length === 1 && Object.keys(msg.result[0]).length === 1) ? 'metric' : 'chart'
         setDetectedType(fallback)
         setDetectingType(false)
       })
+
+    // 获取图表名称
+    const cols = msg.columns || []
+    fetch('/api/chart/name', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        question: msg.userQuestion || '',
+        history: [{ columns: cols }],
+      }),
+    })
+      .then(r => r.json())
+      .then(d => setChartName(d.title || '查询结果'))
+      .catch(() => setChartName(shortTitle(msg.userQuestion || '') || '查询结果'))
   }, [confirmModal])
 
   useEffect(() => { msgEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }, [conversations, activeConvId])
 
-  // ---- 小猫公仔位置计算 ----
-  // idle 时固定在输入区右上，thinking 时定位到最新 AI 气泡上方
-  const [mascotPos, setMascotPos] = useState({ top: 'auto', left: 'auto', right: 16, bottom: 60 })
-  useEffect(() => {
-    if (mascotStatus === 'thinking' && loadingBubbleRef.current && chatAreaRef.current) {
-      const bubbleEl = loadingBubbleRef.current
-      const chatEl = chatAreaRef.current
-      const chatRect = chatEl.getBoundingClientRect()
-      const bubbleRect = bubbleEl.getBoundingClientRect()
-      setMascotPos({
-        top: bubbleRect.top - chatRect.top - 30,
-        left: Math.max(20, bubbleRect.left - chatRect.left + 10),
-        right: 'auto',
-        bottom: 'auto',
+  // ---- 小猫位置：固定在输入框上方 ----
+  const [catPos, setCatPos] = useState({ top: 0, left: 0 })
+  const updateCatPos = () => {
+    if (inputAreaRef.current && chatAreaRef.current) {
+      const chatRect = chatAreaRef.current.getBoundingClientRect()
+      // 发送按钮是输入区的最后一个子元素
+      const sendBtn = inputAreaRef.current.lastElementChild
+      if (!sendBtn) return
+      const btnRect = sendBtn.getBoundingClientRect()
+      // 猫左缘 = 发送按钮左缘（相对于 ChatArea）
+      setCatPos({
+        top: inputAreaRef.current.getBoundingClientRect().top - chatRect.top - 60,
+        left: btnRect.left - chatRect.left,
       })
-    } else if (mascotStatus === 'idle') {
-      setMascotPos({ top: 'auto', left: 'auto', right: 16, bottom: 60 })
     }
-  }, [mascotStatus, loading])
+  }
+  useEffect(() => { updateCatPos() }, [])
+  useEffect(() => {
+    window.addEventListener('resize', updateCatPos)
+    window.addEventListener('sidebar-toggle', updateCatPos)
+    return () => {
+      window.removeEventListener('resize', updateCatPos)
+      window.removeEventListener('sidebar-toggle', updateCatPos)
+    }
+  }, [])
 
   // 广播当前活跃对话 ID 给侧栏用于高亮
   useEffect(() => {
     window.dispatchEvent(new CustomEvent('conv-active', { detail: { id: activeConvId || null } }))
   })
 
+  /**
+   * 更新当前活跃对话中指定索引的消息字段（替代不存在的 setMessages）
+   */
+  const updateMsg = (i, updates) => {
+    setConversations(prev => {
+      const conv = [...(prev[activeConvId] || [])]
+      if (i >= conv.length) return prev
+      conv[i] = { ...conv[i], ...updates }
+      return { ...prev, [activeConvId]: conv }
+    })
+  }
+
   const handleSend = async () => {
     if (!input.trim() || loading) return
     const q = input.trim(); setInput('')
-    const cid = activeConvId // 当前对话 ID，SSE 流全程绑定此值
+    // 统一转为字符串，避免与后端返回的 String(cid) 类型不匹配
+    const cid = String(activeConvId)
     streamingConvIdRef.current = cid
 
     // 追加用户消息到 conversations[cid]
@@ -356,15 +368,18 @@ export default function ChatArea(props) {
       [cid]: [...(prev[cid] || []), { role: 'user', content: q }]
     }))
     setLoading(true); setLoadingStep('🔄 分析查询意图...')
-    setMascotStatus('thinking')
 
     try {
       // 使用 SSE 流式端点（实时进度更新）
       const res = await fetch('/api/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: q, history: [], conv_id: cid, thinking_mode: thinkingMode }),
+        body: JSON.stringify({ question: q, history: [], conv_id: String(cid), thinking_mode: thinkingMode }),
       })
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => '')
+        throw new Error(`请求失败 (${res.status}): ${errBody.slice(0, 200)}`)
+      }
       const reader = res.body?.getReader()
       if (!reader) throw new Error('无法读取响应流')
 
@@ -372,6 +387,7 @@ export default function ChatArea(props) {
       let buffer = ''
       let resultData = null
       let sqlText = ''
+      let hasReceivedBusinessEvent = false  // 是否收到过业务事件（step/sql/result/error/token）
 
       while (true) {
         const { done, value } = await reader.read()
@@ -388,18 +404,26 @@ export default function ChatArea(props) {
             if (l.startsWith('data: ')) dataStr = l.slice(6)
           }
           if (!dataStr) continue
+          // ping 心跳事件 — 直接跳过，不影响业务流程
+          if (eventType === 'ping') continue
           try {
             const d = JSON.parse(dataStr)
             // ---- 关键修复：校验 cid 是否匹配当前流 ----
-            if (d.cid && d.cid !== streamingConvIdRef.current) continue
+            if (d.cid && String(d.cid) !== String(streamingConvIdRef.current)) continue
 
             if (eventType === 'step') {
+              hasReceivedBusinessEvent = true
               setLoadingStep(d.message || '处理中...')
             } else if (eventType === 'sql') {
+              hasReceivedBusinessEvent = true
               sqlText = d.sql || ''
+            } else if (eventType === 'token') {
+              hasReceivedBusinessEvent = true
             } else if (eventType === 'result') {
+              hasReceivedBusinessEvent = true
               resultData = d
             } else if (eventType === 'error') {
+              hasReceivedBusinessEvent = true
               resultData = { error: d.error || '请求出错' }
             }
           } catch {}
@@ -409,7 +433,9 @@ export default function ChatArea(props) {
       // 如果用户在此期间切换了对话（streamingConvIdRef 发生变化），丢弃此响应
       if (streamingConvIdRef.current !== cid) return
 
-      const data = resultData || { error: '未收到有效响应' }
+      // 只要收到过业务事件，就正常结束，不额外报错
+      // 只有完全没收到任何事件时，才提示网络问题
+      const data = resultData || (hasReceivedBusinessEvent ? {} : { error: '未收到有效响应，请检查网络连接或稍后重试' })
       // LLM 智能推荐初始图表（调用 /api/chart/recommend，失败降级到规则）
       let recommendedType = 'bar'; let rx, ry, rSeries, rStacked
       if (data.sql && data.result?.length > 0 && data.columns?.length > 1) {
@@ -443,7 +469,8 @@ export default function ChatArea(props) {
         smartTitle = shortT + (rx ? ` — 按${rx}` : '') + ` — ${chartTypeLabel}`
       }
       const title = smartTitle
-      const msg = { role: 'assistant', content: '', ...data, title, userQuestion: q, thinkingOpen: false, chartType: recommendedType, analysis: null, analysisLoading: false, manualX: rx, manualY: ry, seriesField: rSeries || '', stacked: rStacked || false, manualColor: 0, chartEditorOpen: false }
+      const hasResult = data.result && data.result.length > 0 && data.columns?.length > 0
+      const msg = { role: 'assistant', content: '', ...data, title, userQuestion: q, thinkingOpen: false, chartType: recommendedType, analysis: null, analysisLoading: false, manualX: rx, manualY: ry, seriesField: rSeries || '', stacked: rStacked || false, manualColor: 0, chartEditorOpen: false, tableOpen: hasResult }
       if (data.error) {
         const err = data.error
         if (err.includes('分类器') || err.includes('router') || err.includes('意图')) msg.content = '🤔 暂时无法理解您的问题，请换个说法试试。'
@@ -469,22 +496,26 @@ export default function ChatArea(props) {
         [cid]: [...(prev[cid] || []), { role: 'assistant', content: '❌ 请求失败: ' + e.message }]
       }))
     }
-    finally { setLoading(false); setLoadingStep(''); setMascotStatus('idle'); streamingConvIdRef.current = null }
+    finally { setLoading(false); setLoadingStep(''); streamingConvIdRef.current = null }
   }
 
-  const toggleThinking = (i) => setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, thinkingOpen: !m.thinkingOpen } : m))
+  const toggleThinking = (i) => {
+    const current = conversations[activeConvId]?.[i]
+    if (current) updateMsg(i, { thinkingOpen: !current.thinkingOpen })
+  }
 
   const doExplainChart = async (i) => {
-    const msg = messages[i]
-    setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, analysisLoading: true } : m))
+    const msg = conversations[activeConvId]?.[i]
+    if (!msg) return
+    updateMsg(i, { analysisLoading: true })
     try {
       const res = await fetch('/api/chat/explain-chart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: msg.sql?.slice(0, 100) || '图表分析', history: [{ sql: msg.sql, result: msg.result, columns: msg.columns }] }) })
       const data = await res.json()
-      setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, analysis: data.analysis, analysisLoading: false } : m))
-    } catch { setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, analysis: '分析请求失败', analysisLoading: false } : m)) }
+      updateMsg(i, { analysis: data.analysis, analysisLoading: false, analysisOpen: true })
+    } catch { updateMsg(i, { analysis: '分析请求失败', analysisLoading: false, analysisOpen: true }) }
   }
 
-  const addToDashboard = (msg, targetDashboard, itemType) => {
+  const addToDashboard = (msg, targetDashboard, itemType, name) => {
     const cols = msg.columns || []
     const data = msg.result || []
     let chartData = null
@@ -509,7 +540,7 @@ export default function ChatArea(props) {
       }
     }
     const payload = {
-      title: msg.title || shortTitle(msg.userQuestion || '') || msg.sql?.slice(0, 30) + '...' || '查询结果',
+      title: name || msg.title || shortTitle(msg.userQuestion || '') || msg.sql?.slice(0, 30) + '...' || '查询结果',
       sql: msg.sql,
       result: data,
       columns: cols,
@@ -529,7 +560,7 @@ export default function ChatArea(props) {
     window.dispatchEvent(new CustomEvent('add-to-dashboard', { detail: payload }))
   }
 
-  const applyChartEdit = (i) => { setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, chartEditorOpen: false } : m)); setEditingIdx(null) }
+  const applyChartEdit = (i) => { updateMsg(i, { chartEditorOpen: false }); setEditingIdx(null) }
 
   /** 构建 ECharts option */
   const buildChartOption = (msg) => {
@@ -572,13 +603,17 @@ export default function ChatArea(props) {
               {msg.role === 'user' ? '🐱' : '🤖'}
             </div>
 
-            <div style={{ maxWidth: '80%', minWidth: 200, padding: '10px 14px', borderRadius: 14, fontSize: 13, lineHeight: 1.6, wordBreak: 'break-word', ...(msg.role === 'user' ? { background: 'var(--bg-hover)', color: 'var(--text-primary)', borderBottomRightRadius: 4 } : { background: 'var(--bg-card)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', borderBottomLeftRadius: 4, boxShadow: 'var(--shadow)' }) }}>
+            <div style={{ maxWidth: '75%', width: 'fit-content', minWidth: 60, padding: '10px 14px', borderRadius: 14, fontSize: 13, lineHeight: 1.6, wordBreak: 'break-word', ...(msg.role === 'user' ? { background: 'var(--bg-hover)', color: 'var(--text-primary)', borderBottomRightRadius: 4 } : { background: 'var(--bg-card)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', borderBottomLeftRadius: 4, boxShadow: 'var(--shadow)' }) }}>
               {msg.content}
 
               {/* 思维链 — 有内容时才渲染按钮 */}
               {msg.thinking && msg.thinking.length > 0 && (
                 <div style={{ marginTop: 8 }}>
-                  <button onClick={() => setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, thinkingOpen: !m.thinkingOpen } : m))}
+                  <button onClick={() => setConversations(prev => {
+                    const conv = [...(prev[activeConvId] || [])]
+                    conv[i] = { ...conv[i], thinkingOpen: !conv[i].thinkingOpen }
+                    return { ...prev, [activeConvId]: conv }
+                  })}
                     style={{ padding: '2px 8px', fontSize: 11, cursor: 'pointer', border: 'none', background: 'var(--bg-input)', borderRadius: 4, color: 'var(--text-muted)' }}>
                     {msg.thinkingOpen ? '▼ 收起分析过程' : '▶ 展开分析过程'}
                   </button>
@@ -589,12 +624,49 @@ export default function ChatArea(props) {
               {/* SQL */}
               {msg.sql && <pre style={{ marginTop: 8, padding: 10, borderRadius: 8, background: 'var(--bg-secondary)', fontSize: 11, overflowX: 'auto', border: '1px solid var(--border-color)' }}>{msg.sql}</pre>}
 
+              {/* 数据表格 — 有查询结果时展示（位于图表之前） */}
+              {msg.result && msg.result.length > 0 && msg.columns?.length > 0 && (
+                <div style={{ marginTop: 8 }}>
+                  <button onClick={() => updateMsg(i, { tableOpen: !msg.tableOpen })}
+                    style={{ padding: '2px 8px', fontSize: 11, cursor: 'pointer', border: 'none', background: 'var(--bg-input)', borderRadius: 4, color: 'var(--text-muted)', marginBottom: 4 }}>
+                    {msg.tableOpen ? '▼ 收起数据表' : '▶ 展开数据表'}（{msg.result.length} 行）
+                  </button>
+                  {msg.tableOpen && (
+                    <div style={{ maxHeight: 250, overflow: 'auto', borderRadius: 6, border: '1px solid var(--border-color)' }}>
+                      <table style={{ width: '100%', fontSize: 11, borderCollapse: 'collapse', background: 'var(--bg-card)' }}>
+                        <thead>
+                          <tr style={{ background: 'var(--bg-secondary)', position: 'sticky', top: 0 }}>
+                            {msg.columns.map(col => (
+                              <th key={col} style={{ padding: '6px 8px', textAlign: 'left', color: 'var(--text-primary)', fontWeight: 500, borderBottom: '1px solid var(--border-color)', whiteSpace: 'nowrap' }}>{col}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {msg.result.slice(0, 100).map((row, ri) => (
+                            <tr key={ri} style={{ background: ri % 2 === 0 ? 'var(--bg-card)' : 'var(--bg-secondary)' }}>
+                              {msg.columns.map(col => (
+                                <td key={col} style={{ padding: '4px 8px', color: 'var(--text-secondary)', borderBottom: '1px solid var(--border-color)', maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row[col] !== null && row[col] !== undefined ? String(row[col]) : '—'}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      {msg.result.length > 100 && (
+                        <div style={{ padding: 6, fontSize: 11, color: 'var(--text-muted)', textAlign: 'center', borderTop: '1px solid var(--border-color)' }}>
+                          仅显示前 100 行，共 {msg.result.length} 行
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* 图表 */}
               {msg.result && msg.result.length > 0 && msg.columns?.length > 1 && (
                 <div style={{ marginTop: 8, width: '100%', overflow: 'hidden' }}>
                   {/* 推荐图表类型展示（仅当前推荐类型，无多个选项） */}
                   <div style={{ display: 'flex', gap: 4, marginBottom: 6, flexWrap: 'wrap' }}>
-                    <span style={{ fontSize: 11, color: 'var(--text-muted)', padding: '2px 0' }}>📊 {CHART_TYPES.find(t => t.key === msg.chartType)?.label || msg.chartType}</span>
+                    <span style={{ fontSize: 11, color: 'var(--text-muted)', padding: '2px 0' }}>{CHART_TYPES.find(t => t.key === msg.chartType)?.label || msg.chartType}</span>
                   </div>
 
                   {/* 图表（自适应容器） */}
@@ -604,20 +676,20 @@ export default function ChatArea(props) {
 
                   {/* 操作按钮行 */}
                   <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
-                    <button onClick={() => { setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, chartEditorOpen: !m.chartEditorOpen } : m)); setEditingIdx(i) }}
+                    <button onClick={() => { updateMsg(i, { chartEditorOpen: !msg.chartEditorOpen }); setEditingIdx(i) }}
                       style={{ padding: '3px 10px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>
-                      📊 修改图表
+                      修改图表
                     </button>
                     {!msg.analysisLoading && !msg.analysis && (
-                      <button onClick={() => doExplainChart(i)} style={{ padding: '3px 10px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>📝 图表解析</button>
+                      <button onClick={() => doExplainChart(i)} style={{ padding: '3px 10px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>图表解析</button>
                     )}
-                    <button onClick={() => setConfirmModal({ msg, i })}
-                      style={{ padding: '3px 10px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>📊 添加到大屏</button>
+                    <button onClick={() => { refreshDashboardList(); setConfirmModal({ msg, i }) }}
+                      style={{ padding: '3px 10px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>添加到大屏</button>
                   </div>
-                  {msg.analysisLoading && <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-muted)' }}>🤔 正在分析图表...</div>}
+                  {msg.analysisLoading && <div style={{ marginTop: 4, fontSize: 11, color: 'var(--text-muted)' }}>正在分析图表...</div>}
                   {msg.analysis && (
                     <div style={{ marginTop: 4 }}>
-                      <button onClick={() => setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, analysisOpen: !m.analysisOpen } : m))}
+                      <button onClick={() => updateMsg(i, { analysisOpen: !msg.analysisOpen })}
                         style={{ padding: '2px 8px', fontSize: 11, cursor: 'pointer', border: 'none', background: 'var(--bg-input)', borderRadius: 4, color: 'var(--text-muted)' }}>
                         {msg.analysisOpen ? '▼ 收起图表解析' : '▶ 展开图表解析'}
                       </button>
@@ -631,14 +703,14 @@ export default function ChatArea(props) {
                       {/* 横轴列选择 */}
                       <div style={{ marginBottom: 6 }}>
                         <span style={{ color: 'var(--text-muted)', marginRight: 4 }}>横轴:</span>
-                        <select value={msg.manualX || msg.columns[0] || ''} onChange={e => { setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, manualX: e.target.value } : m)) }} style={selStyle}>
+                        <select value={msg.manualX || msg.columns[0] || ''} onChange={e => updateMsg(i, { manualX: e.target.value })} style={selStyle}>
                           {msg.columns.map(c => <option key={c} value={c}>{c}</option>)}
                         </select>
                       </div>
                       {/* 纵轴列选择 */}
                       <div style={{ marginBottom: 6 }}>
                         <span style={{ color: 'var(--text-muted)', marginRight: 4 }}>纵轴:</span>
-                        <select value={msg.manualY || (msg.columns.length > 1 ? msg.columns[1] : msg.columns[0]) || ''} onChange={e => { setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, manualY: e.target.value } : m)) }} style={selStyle}>
+                        <select value={msg.manualY || (msg.columns.length > 1 ? msg.columns[1] : msg.columns[0]) || ''} onChange={e => updateMsg(i, { manualY: e.target.value })} style={selStyle}>
                           {msg.columns.map(c => <option key={c} value={c}>{c}</option>)}
                         </select>
                       </div>
@@ -647,7 +719,7 @@ export default function ChatArea(props) {
                         <div style={{ color: 'var(--text-muted)', marginBottom: 4 }}>图表类型:</div>
                         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 3 }}>
                           {CHART_TYPES.map(t => (
-                            <button key={t.key} onClick={() => setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, chartType: t.key } : m))}
+                            <button key={t.key} onClick={() => updateMsg(i, { chartType: t.key })}
                               style={{ padding: '3px 4px', fontSize: 10, cursor: 'pointer', borderRadius: 4, background: msg.chartType === t.key ? 'rgba(138,155,174,0.2)' : 'var(--bg-input)', border: msg.chartType === t.key ? '1px solid var(--accent)' : '1px solid var(--border-color)', color: 'var(--text-primary)' }}>
                               {t.label}
                             </button>
@@ -659,13 +731,13 @@ export default function ChatArea(props) {
                         <div style={{ color: 'var(--text-muted)', marginBottom: 4 }}>配色:</div>
                         <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                           {COLOR_SCHEMES.map((s, ci) => (
-                            <button key={s.name} onClick={() => setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, manualColor: ci } : m))}
+                            <button key={s.name} onClick={() => updateMsg(i, { manualColor: ci })}
                               style={{ width: 28, height: 20, borderRadius: 4, cursor: 'pointer', border: msg.manualColor === ci ? '2px solid var(--accent)' : '1px solid var(--border-color)', background: `linear-gradient(90deg, ${s.colors.slice(0, 4).join(', ')})`, padding: 0 }} title={s.name} />
                           ))}
                         </div>
                       </div>
                       {/* 应用按钮 */}
-                      <button onClick={() => { setMessages(prev => prev.map((m, idx) => idx === i ? { ...m, chartEditorOpen: false } : m)); setEditingIdx(null) }}
+                      <button onClick={() => { updateMsg(i, { chartEditorOpen: false }); setEditingIdx(null) }}
                         style={{ padding: '4px 16px', fontSize: 11, cursor: 'pointer', background: 'var(--accent)', color: '#fff', border: 'none', borderRadius: 6 }}>
                         应用
                       </button>
@@ -673,12 +745,29 @@ export default function ChatArea(props) {
                   )}
                 </div>
               )}
+
+              {/* 单指标结果 — 一行一列时渲染为大号数字卡片 */}
+              {msg.result && msg.result.length === 1 && msg.columns?.length === 1 && (
+                <div style={{ marginTop: 8, padding: '16px 20px', background: 'var(--bg-secondary)', borderRadius: 10, border: '1px solid var(--border-color)', textAlign: 'center' }}>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>{msg.columns[0]}</div>
+                  <div style={{ fontSize: 32, fontWeight: 600, color: 'var(--accent)', lineHeight: 1.2, fontVariantNumeric: 'tabular-nums' }}>
+                    {msg.result[0][msg.columns[0]] ?? '—'}
+                  </div>
+                  <div style={{ marginTop: 8 }}>
+                    <button onClick={() => { refreshDashboardList(); setConfirmModal({ msg, i }) }}
+                      style={{ padding: '3px 10px', fontSize: 11, cursor: 'pointer', background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 6, color: 'var(--text-muted)' }}>
+                      添加到大屏
+                    </button>
+                  </div>
+                </div>
+              )}
+
             </div>
           </div>
         ))}
         {/* 加载态智能体气泡 — 显示状态步骤 */}
         {loading && (
-          <div ref={loadingBubbleRef} style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start' }}>
             <div style={{ width: 28, height: 28, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 13, background: 'var(--bg-hover)', color: 'var(--text-muted)' }}>🤖</div>
             <div style={{ maxWidth: '75%', padding: '10px 14px', borderRadius: 14, fontSize: 13, background: 'var(--bg-card)', color: 'var(--text-primary)', border: '1px solid var(--border-color)', borderBottomLeftRadius: 4, boxShadow: 'var(--shadow)' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
@@ -693,24 +782,25 @@ export default function ChatArea(props) {
         <div ref={msgEndRef} />
       </div>
 
-      {suggestions.length > 0 && (
-        <div style={{ padding: '6px 16px', display: 'flex', gap: 6, flexWrap: 'wrap', borderTop: '1px solid var(--border-color)', background: 'var(--bg-secondary)', flexShrink: 0, alignItems: 'center' }}>
-          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>💡</span>
-          {suggestions.map(q => (
-            <button key={q} onClick={() => setInput(q)} style={{ padding: '3px 12px', fontSize: 11, background: '#fff', color: 'var(--accent)', border: '1px solid var(--accent)', borderRadius: 16, cursor: 'pointer' }}>{q}</button>
-          ))}
-          <button onClick={refreshSuggestions} title="换一批" style={{ padding: '2px 8px', fontSize: 11, background: 'transparent', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>🔄 换一批</button>
-        </div>
-      )}
+      <div style={{ position: 'relative', zIndex: 2 }}>
+        {suggestions.length > 0 && (
+          <div style={{ padding: '6px 16px', display: 'flex', gap: 6, flexWrap: 'wrap', borderTop: '1px solid var(--border-color)', background: 'var(--bg-secondary)', flexShrink: 0, alignItems: 'center' }}>
+            <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>💡</span>
+            {suggestions.map(q => (
+              <button key={q} onClick={() => setInput(q)} style={{ padding: '3px 12px', fontSize: 11, background: '#fff', color: 'var(--accent)', border: '1px solid var(--accent)', borderRadius: 16, cursor: 'pointer' }}>{q}</button>
+            ))}
+          </div>
+        )}
+      </div>
 
-      <div style={{ padding: '12px 16px', display: 'flex', gap: 8, background: 'var(--bg-primary)', alignItems: 'center' }}>
+      <div ref={inputAreaRef} style={{ padding: '12px 16px', display: 'flex', gap: 8, background: 'var(--bg-primary)', alignItems: 'center' }}>
         <button onClick={() => setThinkingMode(prev => prev === 'normal' ? 'deep' : 'normal')}
           title={thinkingMode === 'deep' ? '深度思考模式' : '普通模式'}
           style={{ padding: '6px 10px', borderRadius: 8, fontSize: 12, whiteSpace: 'nowrap',
             background: thinkingMode === 'deep' ? 'var(--accent)' : 'var(--bg-input)',
             color: thinkingMode === 'deep' ? '#fff' : 'var(--text-muted)',
             border: '1px solid var(--border-color)', cursor: 'pointer' }}>
-          {thinkingMode === 'deep' ? '🧠 深度' : '⚡ 普通'}
+          {thinkingMode === 'deep' ? '深度' : '普通'}
         </button>
         <textarea value={input} onChange={e => setInput(e.target.value)} onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend() } }} placeholder="输入问题，例如：广东销售额" rows={1} disabled={loading}
           style={{ flex: 1, resize: 'none', padding: '8px 12px', fontSize: 14, border: '1px solid var(--border-color)', borderRadius: 10, background: 'var(--bg-input)', color: 'var(--text-primary)', outline: 'none', minHeight: 40, maxHeight: 120 }} />
@@ -721,50 +811,42 @@ export default function ChatArea(props) {
       </div>
 
       {/* 像素小猫公仔 — 思考时在气泡上跑跳，空闲时在输入区右侧 */}
-      <ChatMascot status={mascotStatus} style={{ top: mascotPos.top, left: mascotPos.left, right: mascotPos.right, bottom: mascotPos.bottom }} />
+      <ChatMascot style={{ position: 'absolute', top: catPos.top, left: catPos.left }} />
 
-      {/* 添加到大屏确认弹窗（含类型自动识别 + 手动切换） */}
+      {/* 添加到大屏确认弹窗 */}
       {confirmModal && (
         <div style={{ position: 'fixed', inset: 0, zIndex: 10000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.4)' }}
           onClick={() => setConfirmModal(null)}>
-          <div style={{ background: 'var(--bg-card)', borderRadius: 12, padding: 24, minWidth: 360, maxWidth: 460, boxShadow: '0 8px 32px rgba(0,0,0,0.2)' }}
+          <div style={{ background: 'var(--bg-card)', borderRadius: 12, padding: 24, minWidth: 360, maxWidth: 440, boxShadow: '0 8px 32px rgba(0,0,0,0.2)' }}
             onClick={e => e.stopPropagation()}>
-            <h3 style={{ fontSize: 15, fontWeight: 500, margin: '0 0 12px', color: 'var(--text-primary)', textAlign: 'center' }}>📊 添加到大屏</h3>
-            {confirmModal.msg.sql && (
-              <pre style={{ fontSize: 11, padding: 8, background: 'var(--bg-secondary)', borderRadius: 6, maxHeight: 60, overflow: 'auto', margin: '0 0 12px', color: 'var(--text-secondary)' }}>{confirmModal.msg.sql}</pre>
-            )}
+            <h3 style={{ fontSize: 15, fontWeight: 500, margin: '0 0 16px', color: 'var(--text-primary)', textAlign: 'center' }}>添加到大屏</h3>
 
-            {/* 类型自动识别区域 */}
-            <div style={{ marginBottom: 14, padding: '10px 12px', background: 'var(--bg-secondary)', borderRadius: 8, border: '1px solid var(--border-color)' }}>
-              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 6 }}>
-                {detectingType ? '🔍 正在识别类型...' : '🎯 类型识别结果'}
-              </div>
-              {!detectingType && (
-                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-                  <span style={{
-                    fontSize: 12, fontWeight: 500,
-                    padding: '2px 10px', borderRadius: 12,
-                    background: (manualType || detectedType) === 'metric' ? '#e8f5e9' : '#e3f2fd',
-                    color: (manualType || detectedType) === 'metric' ? '#2e7d32' : '#1565c0',
-                  }}>
-                    {(manualType || detectedType) === 'metric' ? '📋 指标卡' : '📈 图表'}
-                  </span>
-                  <span style={{ fontSize: 11, color: 'var(--text-secondary)', flex: 1 }}>
-                    {(manualType || detectedType) === 'metric'
-                      ? '显示为单个数值卡片'
-                      : '显示为 ECharts 图表'}
-                  </span>
-                  {/* 手动切换按钮 */}
-                  <button onClick={() => setManualType(manualType === 'metric' ? 'chart' : 'metric')}
-                    style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, border: '1px solid var(--border-color)', background: 'var(--bg-input)', cursor: 'pointer', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-                    切换为{(manualType || detectedType) === 'metric' ? '图表' : '指标'}
-                  </button>
-                </div>
-              )}
+            {/* 图表名称编辑 */}
+            <div style={{ marginBottom: 14 }}>
+              <label style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>图表名称</label>
+              <input type="text" value={chartName} onChange={e => setChartName(e.target.value)}
+                placeholder="输入图表名称..."
+                style={{ width: '100%', padding: '8px 10px', fontSize: 13, background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 8, color: 'var(--text-primary)', outline: 'none', boxSizing: 'border-box' }} />
             </div>
 
-            <div style={{ marginBottom: 12 }}>
-              <label style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>选择目标大屏：</label>
+            {/* 类型展示（只读） */}
+            {!detectingType && (
+              <div style={{ marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8 }}>
+                <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>类型</span>
+                <span style={{
+                  fontSize: 12, fontWeight: 500,
+                  padding: '2px 10px', borderRadius: 12,
+                  background: detectedType === 'metric' ? 'rgba(46,125,50,0.1)' : 'rgba(21,101,192,0.1)',
+                  color: detectedType === 'metric' ? '#2e7d32' : '#1565c0',
+                }}>
+                  {detectedType === 'metric' ? '指标卡' : '图表'}
+                </span>
+              </div>
+            )}
+
+            {/* 目标大屏选择器 */}
+            <div style={{ marginBottom: 16 }}>
+              <label style={{ display: 'block', fontSize: 12, color: 'var(--text-muted)', marginBottom: 4 }}>目标大屏</label>
               <select value={selectedDashboard} onChange={e => setSelectedDashboard(e.target.value)}
                 style={{ width: '100%', padding: '8px 10px', fontSize: 13, background: 'var(--bg-input)', border: '1px solid var(--border-color)', borderRadius: 8, color: 'var(--text-primary)', outline: 'none' }}>
                 {dashboardList.length === 0 && <option value="">（暂无大屏，请先在大屏面板创建）</option>}
@@ -773,8 +855,9 @@ export default function ChatArea(props) {
                 ))}
               </select>
             </div>
+
             <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
-              <button onClick={() => { addToDashboard(confirmModal.msg, selectedDashboard, manualType || detectedType); setConfirmModal(null) }}
+              <button onClick={() => { addToDashboard(confirmModal.msg, selectedDashboard, detectedType, chartName); setConfirmModal(null) }}
                 disabled={dashboardList.length === 0}
                 style={{ padding: '8px 28px', fontSize: 13, cursor: dashboardList.length === 0 ? 'not-allowed' : 'pointer', background: dashboardList.length === 0 ? 'var(--bg-hover)' : 'var(--accent)', color: dashboardList.length === 0 ? 'var(--text-muted)' : '#fff', border: 'none', borderRadius: 8, fontWeight: 500 }}>确定添加</button>
               <button onClick={() => setConfirmModal(null)}
