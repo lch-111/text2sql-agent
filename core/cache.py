@@ -27,7 +27,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field, asdict
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Set
 from datetime import datetime
 
 import numpy as np
@@ -117,6 +117,7 @@ class CacheEntry:
     - sql: 生成的 SQL（或历史 SQL）
     - result_json: 查询结果的 JSON 序列化
     - embedding: 问题的向量表示（用于 L2 语义缓存）
+    - structured_sig: 结构化意图签名（表名+字段+聚合+GROUP BY 的排序哈希）
     - timestamp: 缓存时间
     - token_estimate: 本次查询估算的 Token 消耗
     """
@@ -124,6 +125,7 @@ class CacheEntry:
     sql: str
     result_json: str
     embedding: Optional[List[float]] = None
+    structured_sig: str = ""
     timestamp: str = field(default_factory=lambda: datetime.now().isoformat())
     token_estimate: int = 0
 
@@ -162,6 +164,78 @@ class SemanticCache:
         # L2 缓存的向量索引（基于 Redis 中的缓存条目构建）
         self._l2_entries: List[CacheEntry] = []
         self._max_l2_entries = 500
+
+    # ========================================================================
+    # 结构化意图签名 — 用 FieldResolver 解析结果构建缓存键后缀
+    # ========================================================================
+
+    def _extract_structured_sig(self, query: str) -> str:
+        """
+        从查询文本中提取结构化意图特征，生成排序后的哈希签名。
+
+        特征包括：涉及的表名、字段列表、聚合函数类型、是否有 GROUP BY。
+        仅文本相似度超过阈值 且 结构化签名完全一致时，才返回缓存。
+
+        若 FieldResolver 不可用或解析失败，返回空字符串（降级为纯文本匹配）。
+        """
+        tables: Set[str] = set()
+        fields: Set[str] = set()
+        agg_funcs: Set[str] = set()
+        has_group_by = False
+        has_join = False
+
+        # 用正则简单提取常见聚合函数
+        agg_pattern = re.findall(
+            r'\b(SUM|COUNT|AVG|MAX|MIN|DISTINCT)\s*\(', query, re.IGNORECASE
+        )
+        agg_funcs.update(f.upper() for f in agg_pattern)
+
+        # 是否有 GROUP BY
+        if re.search(r'\bGROUP\s+BY\b', query, re.IGNORECASE):
+            has_group_by = True
+
+        # 是否有 JOIN
+        if re.search(r'\bJOIN\b', query, re.IGNORECASE):
+            has_join = True
+
+        # 通过 FieldResolver（如果已初始化 memory_manager）尝试解析字段映射
+        try:
+            mm = getattr(self, 'memory_manager', None)
+            if mm:
+                mappings = mm.get_all_global_mappings()
+                for m in mappings:
+                    fname = m.get("field", "").lower()
+                    dval = m.get("display_value", "").lower()
+                    if fname and dval and dval in query.lower():
+                        fields.add(fname)
+        except Exception:
+            pass
+
+        # 整理为排序后的签名
+        parts = []
+        if tables:
+            parts.append("T:" + ",".join(sorted(tables)))
+        if fields:
+            parts.append("F:" + ",".join(sorted(fields)))
+        if agg_funcs:
+            parts.append("A:" + ",".join(sorted(agg_funcs)))
+        if has_group_by:
+            parts.append("GB:1")
+        if has_join:
+            parts.append("JN:1")
+
+        sig = "|".join(parts) if parts else ""
+        return sig
+
+    def _normalized_cache_key(self, query: str) -> str:
+        """
+        结合原始问题和结构化意图签名生成统一缓存键。
+        L1 精确缓存直接使用此键，L2 语义缓存也通过此键严格比对。
+        """
+        sig = self._extract_structured_sig(query)
+        if sig:
+            return f"{query} ||| {sig}"
+        return query
 
     def _init_redis(self):
         """
@@ -259,8 +333,9 @@ class SemanticCache:
     # ========================================================================
 
     def _l1_key(self, query: str) -> str:
-        """L1 缓存的 key：md5(query)"""
-        return f"sql_cache:l1:{hashlib.md5(query.encode()).hexdigest()}"
+        """L1 缓存的 key：md5(结构化标准化后的查询)"""
+        nk = self._normalized_cache_key(query)
+        return f"sql_cache:l1:{hashlib.md5(nk.encode()).hexdigest()}"
 
     def _l1_get(self, query: str) -> Optional[CacheEntry]:
         """L1 精确查找（仅通过 Redis）"""
@@ -272,7 +347,9 @@ class SemanticCache:
 
     def _l1_set(self, entry: CacheEntry):
         """写入 L1 缓存（仅通过 Redis）"""
-        key = self._l1_key(entry.query)
+        nk = self._normalized_cache_key(entry.query)
+        entry.structured_sig = self._extract_structured_sig(entry.query)
+        key = f"sql_cache:l1:{hashlib.md5(nk.encode()).hexdigest()}"
         data = json.dumps(asdict(entry), ensure_ascii=False)
         self._redis.setex(key, self.cfg.cache_ttl_seconds, data)
 
@@ -285,15 +362,15 @@ class SemanticCache:
         L2 语义查找。
 
         计算当前问题的向量，与历史问题的向量逐一比对。
-        当最大相似度 > threshold 时，返回对应的缓存条目。
+        当最大相似度 > threshold 且结构化签名完全一致时，返回对应的缓存条目。
 
-        优化思路：
-        - 生产环境可使用 Milvus/FAISS 做大规模近似搜索
-        - 本实现在条目少时用暴力搜索，足够原型使用
+        结构化签名包含（表名、字段、聚合函数、GROUP BY 标志），
+        确保"黑龙江销售额"与"商品平均单价"即使文本相似也不会误命中。
         """
         if not self._l2_entries:
             return None
 
+        query_sig = self._extract_structured_sig(query)
         query_embedding = self._get_embedding(query)
         best_similarity = 0.0
         best_entry = None
@@ -301,6 +378,17 @@ class SemanticCache:
         for entry in self._l2_entries:
             if entry.embedding is None:
                 continue
+
+            # 【校验 1】结构化签名必须完全一致
+            if query_sig and entry.structured_sig:
+                if query_sig != entry.structured_sig:
+                    cache_logger.debug(
+                        f"[L2] 跳过缓存: 结构化签名不匹配 "
+                        f"query='{query_sig}' vs entry='{entry.structured_sig}'"
+                    )
+                    continue
+
+            # 【校验 2】语义相似度必须超过阈值
             similarity = self._cosine_similarity(query_embedding, entry.embedding)
             if similarity > best_similarity:
                 best_similarity = similarity
@@ -322,6 +410,10 @@ class SemanticCache:
             if existing.query == entry.query:
                 return
 
+        # 计算结构化签名
+        if not entry.structured_sig:
+            entry.structured_sig = self._extract_structured_sig(entry.query)
+
         # 如果当前没有 embedding，生成一个
         if entry.embedding is None:
             try:
@@ -334,6 +426,88 @@ class SemanticCache:
         # 限制内存缓存大小（LRU 策略：移除最旧的）
         if len(self._l2_entries) > self._max_l2_entries:
             self._l2_entries = self._l2_entries[-self._max_l2_entries:]
+
+    # ========================================================================
+    # 缓存结果校验（sqlglot 列名提取 + FieldResolver 字段比对）
+    # ========================================================================
+
+    def _validate_cache_sql(
+        self, sql: str, query: str
+    ) -> bool:
+        """
+        用 sqlglot 提取缓存 SQL 中的所有列名，与当前问题的字段引用做比对。
+        若交集为空，说明缓存 SQL 与当前查询意图无关，应丢弃。
+
+        返回 True 表示校验通过，False 表示应丢弃缓存。
+        """
+        try:
+            import sqlglot
+            from sqlglot import exp as sqlglot_exp
+
+            # 1. 提取缓存 SQL 中的列名
+            parsed = sqlglot.parse_one(sql)
+            cached_columns: Set[str] = set()
+            for node in parsed.find_all(sqlglot_exp.Column):
+                col_name = node.name.lower()
+                if col_name and col_name != '*':
+                    cached_columns.add(col_name)
+
+            # 无列名的 SQL（如 SELECT 1）直接放行
+            if not cached_columns:
+                return True
+
+            # 2. 从当前查询中提取可能的字段引用
+            query_fields: Set[str] = set()
+            # 尝试通过 memory_manager 的全局映射提取
+            mm = getattr(self, 'memory_manager', None)
+            if mm:
+                try:
+                    mappings = mm.get_all_global_mappings()
+                    for m in mappings:
+                        fname = m.get("field", "").lower()
+                        dval = m.get("display_value", "").lower()
+                        if fname:
+                            query_fields.add(fname)
+                            if dval and dval in query.lower():
+                                query_fields.add(fname)
+                except Exception:
+                    pass
+
+            # 从聚合函数提取字段
+            for match in re.findall(
+                r'(SUM|COUNT|AVG|MAX|MIN)\s*\(\s*(\w+)',
+                query, re.IGNORECASE
+            ):
+                query_fields.add(match[1].lower())
+
+            # 从 WHERE 子句样式中提取字段
+            for match in re.findall(
+                r'(?:WHERE|AND|OR)\s+(\w+)\s*(?:=|!=|<|>|IN|LIKE)',
+                query, re.IGNORECASE
+            ):
+                query_fields.add(match.lower())
+
+            # 如果当前查询未能提取出字段（口语太模糊），不拦截缓存
+            if not query_fields:
+                return True
+
+            # 3. 计算交集
+            overlap = cached_columns & query_fields
+            if not overlap:
+                cache_logger.info(
+                    f"[缓存校验] 列名交集为空，丢弃缓存: "
+                    f"SQL列={cached_columns}, 查询字段={query_fields}"
+                )
+                return False
+
+            cache_logger.debug(
+                f"[缓存校验] 通过: 交集={overlap}"
+            )
+            return True
+
+        except Exception as e:
+            cache_logger.debug(f"[缓存校验] 异常，放行缓存: {e}")
+            return True
 
     # ========================================================================
     # 对外接口
@@ -356,14 +530,20 @@ class SemanticCache:
         try:
             entry = self._l1_get(query)
             if entry is not None:
-                self.stats.record_l1_hit()
-                cache_logger.info(f"[L1精确缓存] 命中: '{query[:50]}...'")
-                return {
-                    "sql": entry.sql,
-                    "result": json.loads(entry.result_json),
-                    "source": "L1",
-                    "similarity": 1.0,
-                }
+                # 用 sqlglot 校验缓存 SQL 的列与当前查询字段有交集
+                if self._validate_cache_sql(entry.sql, query):
+                    self.stats.record_l1_hit()
+                    cache_logger.info(f"[L1精确缓存] 命中: '{query[:50]}...'")
+                    return {
+                        "sql": entry.sql,
+                        "result": json.loads(entry.result_json),
+                        "source": "L1",
+                        "similarity": 1.0,
+                    }
+                else:
+                    cache_logger.info(
+                        f"[L1缓存] sqlglot 校验不通过，丢弃: '{query[:50]}...'"
+                    )
         except Exception as e:
             cache_logger.warning(f"L1 缓存查询失败: {e}")
 
@@ -371,16 +551,22 @@ class SemanticCache:
         try:
             entry = self._l2_search(query)
             if entry is not None:
-                self.stats.record_l2_hit()
-                return {
-                    "sql": entry.sql,
-                    "result": json.loads(entry.result_json),
-                    "source": "L2",
-                    "similarity": self._cosine_similarity(
-                        self._get_embedding(query),
-                        entry.embedding or [],
-                    ),
-                }
+                if self._validate_cache_sql(entry.sql, query):
+                    self.stats.record_l2_hit()
+                    return {
+                        "sql": entry.sql,
+                        "result": json.loads(entry.result_json),
+                        "source": "L2",
+                        "similarity": self._cosine_similarity(
+                            self._get_embedding(query),
+                            entry.embedding or [],
+                        ),
+                    }
+                else:
+                    cache_logger.info(
+                        f"[L2缓存] sqlglot 校验不通过，丢弃: "
+                        f"'{query[:50]}...'"
+                    )
         except Exception as e:
             cache_logger.warning(f"L2 缓存查询失败: {e}")
 
@@ -404,10 +590,13 @@ class SemanticCache:
         else:
             result_json = json.dumps(result, ensure_ascii=False, default=str)
 
+        structured_sig = self._extract_structured_sig(query)
+
         entry = CacheEntry(
             query=query,
             sql=sql,
             result_json=result_json,
+            structured_sig=structured_sig,
             timestamp=datetime.now().isoformat(),
             token_estimate=token_estimate,
         )
@@ -418,7 +607,7 @@ class SemanticCache:
         except Exception as e:
             cache_logger.warning(f"L1 缓存写入失败: {e}")
 
-        # 写入 L2（生成 embedding）
+        # 写入 L2（生成 embedding + 结构化签名）
         try:
             self._l2_add(entry)
         except Exception as e:

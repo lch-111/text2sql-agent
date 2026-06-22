@@ -339,6 +339,13 @@ def save_context_node(state: AgentState) -> Dict:
     conv_id = state.get("conv_id", "")
 
     context = conversation_mgr.extract_context(sql, user_query)
+
+    # 若当前查询是独立查询（非追问），清空之前对话历史中的过滤条件，
+    # 防止如"WHERE province='黑龙江'"残留在下一轮查询中
+    is_independent = not state.get("is_follow_up", False)
+    if is_independent:
+        conv_history = []
+
     updated_history = conversation_mgr.update_history(
         history=conv_history,
         user_query=user_query,
