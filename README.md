@@ -1,6 +1,6 @@
 # Text-to-SQL Agent 
 
-> **智能数据分析 Agent** — 基于 LangGraph 的多 Agent 协作 · 物理安全护栏 · Self-Correction 
+> **企业级智能数据分析 Agent** — 基于 LangGraph 的多 Agent 协作 · 物理安全护栏 · Self-Correction 
 
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ed?logo=docker)](https://docker.com)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi)](https://fastapi.tiangolo.com)
@@ -29,7 +29,6 @@
 
 ![数据大屏](image/image.png)
 ![数据大屏](image/image1.png)
-
 
 ```
 用户提问 → Router 分类 → Schema 检索 + FieldResolver → SQL 生成 → Critic 校验 → SQLGuard 拦截 → 执行 → 可视化
