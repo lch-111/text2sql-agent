@@ -28,6 +28,8 @@
 **Text-to-SQL Agent** 是一个企业级智能数据分析系统，将用户自然语言问题转化为 SQL 查询。基于 LangGraph 多 Agent 协作架构，全部推理通过云端 API（OpenAI 兼容）完成。
 
 ![数据大屏](image/image.png)
+![数据大屏](image/image1.png)
+
 
 ```
 用户提问 → Router 分类 → Schema 检索 + FieldResolver → SQL 生成 → Critic 校验 → SQLGuard 拦截 → 执行 → 可视化
@@ -167,7 +169,7 @@ SQL 执行失败 → search_similar_trace() → 检索 tracess/ 历史修正
 
 18 种图表类型 × 21 种配色风格，大屏采用 **3 列 GridLayout** 深色底板布局：顶部 KPI 指标栏横向排列单值指标，图表区自动填充无滚动。支持统一主题切换（预览→保存/恢复）、容器透明度调节、单图表配色独立于全局主题。图表卡片无边框扁平化设计，操作按钮悬停显示，支持拖拽吸附与缩放。全屏模式下自适应容器尺寸。
 
-![图表可视化](image/image1.png)
+![图表可视化](image/image2.png)
 
 ---
 
