@@ -1,6 +1,6 @@
-# Text-to-SQL Agent 🤖
+# Text-to-SQL Agent 
 
-> **企业级智能数据分析 Agent** — 基于 LangGraph 的多 Agent 协作 · 物理安全护栏 · Self-Correction · 莫兰迪 UI
+> **智能数据分析 Agent** — 基于 LangGraph 的多 Agent 协作 · 物理安全护栏 · Self-Correction 
 
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ed?logo=docker)](https://docker.com)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi)](https://fastapi.tiangolo.com)
