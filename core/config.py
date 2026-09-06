@@ -67,6 +67,12 @@ class SemanticCacheConfig:
 # ============================================================================
 # LLM 配置 — 百炼统一入口（OpenAI 兼容模式）
 # ============================================================================
+# 百炼（阿里云 DashScope）OpenAI 兼容端点，作为各类 Key 槽位的默认兜底。
+# 说明：qwen 与 deepseek 模型均上架百炼，可用同一把百炼 Key 调通，
+# model_client 会按模型名前缀自动选择 Key 槽位，槽位为空时回退到此端点。
+DASHSCOPE_COMPAT_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+
+
 @dataclass
 class LLMConfig:
     """大语言模型调用配置（百炼统一入口，OpenAI 兼容 API）"""
@@ -80,7 +86,7 @@ class LLMConfig:
     deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "").strip()
     deepseek_base_url: str = os.getenv(
         "DEEPSEEK_BASE_URL",
-        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        DASHSCOPE_COMPAT_URL,
     )
 
     # ---- Dashscope 备用 Key（可选）----
@@ -92,20 +98,21 @@ class LLMConfig:
     openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
     openai_base_url: str = os.getenv(
         "OPENAI_BASE_URL",
-        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        DASHSCOPE_COMPAT_URL,
     )
     glm_api_key: str = os.getenv("GLM_API_KEY", "").strip()
     glm_base_url: str = os.getenv(
         "GLM_BASE_URL",
-        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        DASHSCOPE_COMPAT_URL,
     )
 
-    # 角色模型分级（全部 DeepSeek 系列，可各自用 *_MODEL 环境变量覆盖）：
-    #   generator / critic —— 强推理，用 pro；router / reranker —— 轻量，用 flash
-    router_model: str = os.getenv("ROUTER_MODEL", "deepseek-v4-flash")
+    # 角色模型分级（可各自用 *_MODEL 环境变量覆盖；qwen 与 deepseek 均在百炼，
+    #   model_client 按模型名前缀路由 Key/端点，见 model_client.resolve_for_model）：
+    #   generator / critic —— 强推理，用 deepseek pro；router / reranker / 工具选择 —— 轻量，用 qwen flash
+    router_model: str = os.getenv("ROUTER_MODEL", "qwen3.8-flash")
     generator_model: str = os.getenv("GENERATOR_MODEL", "deepseek-v4-pro-0813")
     critic_model: str = os.getenv("CRITIC_MODEL", "deepseek-v4-pro-0813")
-    reranker_model: str = os.getenv("RERANKER_MODEL", "deepseek-v4-flash")
+    reranker_model: str = os.getenv("RERANKER_MODEL", "qwen3.8-flash")
 
     # ---- 统一解析结果（供 model_client.create_llm_client 使用）----
 
@@ -142,7 +149,7 @@ class LLMConfig:
         规则：生效 Key 属于哪个提供商，就取哪个 base_url；全部未配置时
         退回百炼兼容端点（None 值不会出现，因为每个分支都有兜底）。
         """
-        dashscope = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        dashscope = DASHSCOPE_COMPAT_URL
         if self.deepseek_api_key:
             return (self.deepseek_base_url or dashscope).rstrip("/")
         if self.dashscope_api_key:

@@ -51,13 +51,14 @@
       "command": "python",
       "args": ["E:/Text-to-SQL-Agent/mcp_server.py"],
       "env": {
+        "DEEPSEEK_API_KEY": "sk-你的百炼-Key",
+        "GLM_API_KEY": "（可省略；或填同一把百炼 Key / 其它 GLM 兼容 Key）",
         "OPENAI_API_KEY": "sk-你的百炼-Key",
         "OPENAI_BASE_URL": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "GLM_API_KEY": "你的-GLM-Key（可选）",
-        "ROUTER_MODEL": "deepseek-v4-flash",
+        "ROUTER_MODEL": "qwen3.8-flash",
         "GENERATOR_MODEL": "deepseek-v4-pro-0813",
         "CRITIC_MODEL": "deepseek-v4-pro-0813",
-        "RERANKER_MODEL": "deepseek-v4-flash",
+        "RERANKER_MODEL": "qwen3.8-flash",
         "DB_TYPE": "mysql",
         "MYSQL_HOST": "127.0.0.1",
         "MYSQL_PORT": "3306",
@@ -71,9 +72,14 @@
 ```
 
 ### 说明
-- **模型 Key**：沿用原有多 Key 配置方式，**不强制统一**。`model_client.py` 按
-  `DEEPSEEK_API_KEY → DASHSCOPE_API_KEY → OPENAI_API_KEY → GLM_API_KEY` 自动回退解析；
-  上例只填了 `OPENAI_*` 也够用。需要哪个模型供应商就把对应变量补进 `env` 即可。
+- **模型 Key（按模型名路由）**：四角色模型为 router/reranker=`qwen3.8-flash`、
+  generator/critic=`deepseek-v4-pro-0813`，**两者均为百炼模型，可共用同一把百炼 Key**。
+  `model_client.py` 按模型名前缀自动路由 Key 槽位：`deepseek*`→`DEEPSEEK_API_KEY`、
+  `qwen*`→百炼（`OPENAI_API_KEY`/`DASHSCOPE_API_KEY`）、`glm*`→`GLM_API_KEY`；某槽位为空
+  时自动回退到其它已配 Key。**因此最少只需一把百炼 Key**（填 `DEEPSEEK_API_KEY` 或
+  `OPENAI_API_KEY` 均可调通全部角色）。README 示例同时列出 `DEEPSEEK_API_KEY` 与
+  `GLM_API_KEY` 两个槽位，方便你有 DeepSeek / GLM 专用 Key 时按需补充；**若只为 qwen+deepseek
+  服务，也可只留一把百炼 Key，其余删除**。
 - **数据库连接二选一**：
   1. 如上通过 `env` 传 `DB_TYPE` + `MYSQL_*` / `PG_*` / `DB_PATH`（sqlite）；
   2. 或者**保持已保存连接**：项目 `data/connection.json` 若存在，`DatabaseManager`

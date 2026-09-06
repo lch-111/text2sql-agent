@@ -261,8 +261,9 @@ print(result["result"]) # [{"total_sales": 3347000}]
 
 ### 环境变量 (`.env`)
 
-模型调用经 `model_client.py` 统一收口（Key 自动按 DEEPSEEK → DASHSCOPE → OPENAI → GLM
-回退解析，部署默认沿用下方 `OPENAI_*` 方案即可）。
+模型调用经 `model_client.py` 统一收口：按模型名前缀自动路由 Key（`deepseek*`/`qwen*`
+均为百炼模型、可共用同一把百炼 Key，`glm*` 走 GLM 槽），某槽位为空自动回退到其它已配
+Key；部署默认沿用下方 `OPENAI_*` 方案即可。
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
@@ -270,10 +271,10 @@ print(result["result"]) # [{"total_sales": 3347000}]
 | `OPENAI_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI 兼容 API 地址 |
 | `GLM_API_KEY` | - | 旧回退 Key（可选） |
 | `GLM_BASE_URL` | 百炼兼容端点 | 旧回退端点 |
-| `ROUTER_MODEL` | `deepseek-v4-flash` | 路由/分类/工具选择模型（轻量） |
-| `GENERATOR_MODEL` | `deepseek-v4-pro-0813` | SQL 生成模型（强推理） |
+| `ROUTER_MODEL` | `qwen3.8-flash` | 路由/分类/工具选择模型（百炼 qwen，轻量） |
+| `GENERATOR_MODEL` | `deepseek-v4-pro-0813` | SQL 生成模型（百炼 deepseek，强推理） |
 | `CRITIC_MODEL` | `deepseek-v4-pro-0813` | SQL 校验模型 |
-| `RERANKER_MODEL` | `deepseek-v4-flash` | Schema 精排模型 |
+| `RERANKER_MODEL` | `qwen3.8-flash` | Schema 精排模型（百炼 qwen，轻量） |
 | `ADMIN_TOKEN` | - | 管理令牌（SHA256，空=仅本地访问） |
 | `DB_TYPE` | `sqlite` | 数据库类型 |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
