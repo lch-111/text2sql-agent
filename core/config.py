@@ -65,27 +65,93 @@ class SemanticCacheConfig:
 
 
 # ============================================================================
-# LLM 配置 — OpenAI 兼容 API
+# LLM 配置 — 百炼统一入口（OpenAI 兼容模式）
 # ============================================================================
 @dataclass
 class LLMConfig:
-    """大语言模型调用配置（OpenAI 兼容 API）"""
+    """大语言模型调用配置（百炼统一入口，OpenAI 兼容 API）"""
     # ---- 管理令牌（SHA256 哈希，为空时仅允许本地访问管理接口）----
     admin_token_hash: str = os.getenv("ADMIN_TOKEN", "")
 
-    # ---- DeepSeek / 主模型（阿里云百炼）----
-    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
-    openai_base_url: str = os.getenv("OPENAI_BASE_URL", "")
+    # ---- DeepSeek 统一入口（主，用户只需配这一个）----
+    # 注意：DEEPSEEK_BASE_URL 默认指向百炼兼容端点（DashScope 上架的
+    # deepseek-v4-* 系列）。若你用的是 DeepSeek 原生平台 Key，请把
+    # DEEPSEEK_BASE_URL 改为 https://api.deepseek.com。
+    deepseek_api_key: str = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    deepseek_base_url: str = os.getenv(
+        "DEEPSEEK_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
 
-    # ---- GLM 模型（智谱 AI，独立 Key）----
-    glm_api_key: str = os.getenv("GLM_API_KEY", "")
-    glm_base_url: str = os.getenv("GLM_BASE_URL", "https://open.bigmodel.cn/api/paas/v4")
+    # ---- Dashscope 备用 Key（可选）----
+    dashscope_api_key: str = os.getenv("DASHSCOPE_API_KEY", "").strip()
 
-    # 四个专用模型
-    router_model: str = os.getenv("ROUTER_MODEL", "glm-4-flash")
-    generator_model: str = os.getenv("GENERATOR_MODEL", "deepseek-v4-flash")
-    critic_model: str = os.getenv("CRITIC_MODEL", "glm-4-flash")
-    reranker_model: str = os.getenv("RERANKER_MODEL", "glm-4-flash")
+    # ---- 旧 Key 字段：仅作降级回退保留，不推荐再单独维护 ----
+    # resolved_api_key 在 DEEPSEEK/DASHSCOPE 均为空时，才会依次回退到
+    # OPENAI_API_KEY / GLM_API_KEY，保证存量 .env 不迁移也能跑。
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "").strip()
+    openai_base_url: str = os.getenv(
+        "OPENAI_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+    glm_api_key: str = os.getenv("GLM_API_KEY", "").strip()
+    glm_base_url: str = os.getenv(
+        "GLM_BASE_URL",
+        "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    )
+
+    # 角色模型分级（全部 DeepSeek 系列，可各自用 *_MODEL 环境变量覆盖）：
+    #   generator / critic —— 强推理，用 pro；router / reranker —— 轻量，用 flash
+    router_model: str = os.getenv("ROUTER_MODEL", "deepseek-v4-flash")
+    generator_model: str = os.getenv("GENERATOR_MODEL", "deepseek-v4-pro-0813")
+    critic_model: str = os.getenv("CRITIC_MODEL", "deepseek-v4-pro-0813")
+    reranker_model: str = os.getenv("RERANKER_MODEL", "deepseek-v4-flash")
+
+    # ---- 统一解析结果（供 model_client.create_llm_client 使用）----
+
+    @property
+    def resolved_api_key(self) -> str:
+        """主 Key 解析：DEEPSEEK → DASHSCOPE → OPENAI → GLM，返回第一个非空值。"""
+        for key in (
+            self.deepseek_api_key,
+            self.dashscope_api_key,
+            self.openai_api_key,
+            self.glm_api_key,
+        ):
+            if key:
+                return key
+        return ""
+
+    @property
+    def resolved_provider(self) -> str:
+        """当前生效的提供商标识（诊断/日志用），与 resolved_api_key 同序。"""
+        if self.deepseek_api_key:
+            return "deepseek"
+        if self.dashscope_api_key:
+            return "dashscope"
+        if self.openai_api_key:
+            return "openai"
+        if self.glm_api_key:
+            return "glm"
+        return "none"
+
+    @property
+    def resolved_base_url(self) -> str:
+        """与生效 Key 同源的端点解析（OpenAI 兼容）。
+
+        规则：生效 Key 属于哪个提供商，就取哪个 base_url；全部未配置时
+        退回百炼兼容端点（None 值不会出现，因为每个分支都有兜底）。
+        """
+        dashscope = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+        if self.deepseek_api_key:
+            return (self.deepseek_base_url or dashscope).rstrip("/")
+        if self.dashscope_api_key:
+            return dashscope
+        if self.openai_api_key:
+            return (self.openai_base_url or dashscope).rstrip("/")
+        if self.glm_api_key:
+            return (self.glm_base_url or dashscope).rstrip("/")
+        return dashscope
 
     # LLM 调用参数
     temperature: float = 0.1
@@ -152,6 +218,8 @@ class EvaluationConfig:
     report_path: str = "eval_results/eval_report.json"
     # 评估框架: "ragas" | "deepeval"
     framework: str = "deepeval"
+    # 动态评估数据集的最大用例数（按当前连接库 schema 自适应生成，默认上限 24）
+    max_cases: int = int(os.getenv("EVAL_MAX_CASES", "24"))
 
 
 # ============================================================================

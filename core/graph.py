@@ -28,8 +28,7 @@ import logging
 import time
 from typing import Any, Dict, List, Optional, TypedDict
 
-from core.config import CONFIG
-from core.llm_client import BaseLLMClient
+from model_client import create_llm_client
 
 logger = logging.getLogger("graph")
 
@@ -75,6 +74,7 @@ class AgentState(TypedDict):
     # 缓存层
     cache_hit: bool  # 是否缓存命中
     cache_source: str  # "L1" | "L2" | ""
+    use_cache: bool  # 是否启用语义缓存（False 时跳过缓存读写；评测/批量场景为 False）
 
     # 执行结果
     result: List[Dict]  # 查询结果
@@ -113,6 +113,7 @@ def create_initial_state(
     conversation_history: list = None,
     conv_id: str = "",
     thinking_mode: str = "normal",
+    use_cache: bool = True,
 ) -> AgentState:
     """创建初始状态（含记忆系统 + ReAct + 思考模式字段）"""
     return {
@@ -132,6 +133,7 @@ def create_initial_state(
         "sql": "",
         "cache_hit": False,
         "cache_source": "",
+        "use_cache": use_cache,
         "result": [],
         "columns": [],
         "error": "",
@@ -195,36 +197,17 @@ TOOL_SELECTOR_SYSTEM_PROMPT = """你是一个智能数据分析助手。你可�
 # ============================================================================
 
 def _create_llm_clients():
-    """根据配置创建所有 LLM 客户端实例"""
-    cfg = CONFIG.llm
+    """根据配置创建所有 LLM 客户端实例。
 
-    # GLM 模型（Router / Critic / Reranker）→ 智谱 AI
-    llm_router = BaseLLMClient(
-        model=cfg.router_model,
-        base_url=cfg.glm_base_url,
-        api_key=cfg.glm_api_key,
-        name="router",
-    )
-    # DeepSeek（Generator）→ 阿里云百炼
-    llm_generator = BaseLLMClient(
-        model=cfg.generator_model,
-        base_url=cfg.openai_base_url,
-        api_key=cfg.openai_api_key,
-        name="generator",
-        timeout=180,
-    )
-    llm_critic = BaseLLMClient(
-        model=cfg.critic_model,
-        base_url=cfg.glm_base_url,
-        api_key=cfg.glm_api_key,
-        name="critic",
-    )
-    llm_reranker = BaseLLMClient(
-        model=cfg.reranker_model,
-        base_url=cfg.glm_base_url,
-        api_key=cfg.glm_api_key,
-        name="reranker",
-    )
+    统一经 model_client.create_llm_client 解析：
+    Key 走 DEEPSEEK → DASHSCOPE → OPENAI → GLM 回退，端点跟随生效 Key，
+    模型按角色 pro/flash 分级（generator/critic=pro，router/reranker=flash）。
+    原 GLM/百炼各自直拼 BaseLLMClient 的构造已被收口，行为对外不变。
+    """
+    llm_router = create_llm_client("router")
+    llm_generator = create_llm_client("generator")
+    llm_critic = create_llm_client("critic")
+    llm_reranker = create_llm_client("reranker")
 
     return llm_router, llm_generator, llm_critic, llm_reranker
 
@@ -422,8 +405,7 @@ def tool_selector_node(state: AgentState) -> Dict:
     支持工具：search_schema, execute_sql, correct_sql, ask_user, return_result
     最大迭代 10 次防止无限循环。
     """
-    from core.llm_client import BaseLLMClient
-    from core.config import CONFIG
+    from model_client import create_llm_client
 
     loop_count = state.get("react_loop_count", 0)
     if loop_count >= 10:
@@ -464,12 +446,8 @@ def tool_selector_node(state: AgentState) -> Dict:
         sys_prompt += "\n\n## 深度分析模式\n请进行详细的逐步分析。花时间思考每个工具的适用性，考虑多种可能的查询方法，选择最优方案。输出中增加分析步骤。"
 
     try:
-        llm = BaseLLMClient(
-            model=CONFIG.llm.router_model,
-            base_url=CONFIG.llm.glm_base_url,
-            api_key=CONFIG.llm.glm_api_key,
-            name="tool_selector",
-        )
+        # ReAct 工具选择复用 router 分级（flash，轻量分类任务）
+        llm = create_llm_client("tool_selector")
         raw = llm.generate(prompt=prompt, system_prompt=sys_prompt)
         parsed = _parse_tool_response(raw)
 
@@ -723,6 +701,12 @@ def check_cache_node(state: AgentState) -> Dict:
     命中则跳过 SQL 生成。
     """
     from core.cache import get_cache
+
+    # use_cache=False：显式跳过缓存读取（评测/批量场景）。
+    # 模板化问题的同表同字段措辞高度相似，L2 余弦阈值下极易跨题串命中，
+    # 若不在此拦截，会直接返回上一条不相关 SQL。
+    if not state.get("use_cache", True):
+        return {"cache_hit": False, "cache_source": ""}
 
     start = time.time()
 
@@ -1062,6 +1046,10 @@ def write_cache_node(state: AgentState) -> Dict:
     查询成功后，将结果写入 L1 和 L2 缓存。
     """
     from core.cache import get_cache
+
+    # use_cache=False：跳过缓存写入，避免把评测/批量生成的查询污染共享缓存
+    if not state.get("use_cache", True):
+        return {}
 
     if not state["error"] and state["result"]:
         try:
@@ -1410,6 +1398,7 @@ def execute(
     conversation_history: list = None,
     conv_id: str = "",
     thinking_mode: str = "normal",
+    use_cache: bool = True,
 ) -> Dict[str, Any]:
     """
     统一执行入口（增强版 — 支持记忆系统 + ReAct Loop + 思考模式）。
@@ -1422,6 +1411,8 @@ def execute(
         conversation_history: 结构化查询历史（跨轮追问用）
         conv_id: 对话 ID（用于对话级记忆隔离）
         thinking_mode: "normal" 或 "deep"
+        use_cache: 是否启用语义缓存（默认 True 保持在线行为；
+                   False 时 check_cache_node / write_cache_node 均跳过）
 
     返回:
         结果字典（与原有 get_agent().run() 兼容）
@@ -1432,6 +1423,7 @@ def execute(
         conversation_history=conversation_history,
         conv_id=conv_id,
         thinking_mode=thinking_mode,
+        use_cache=use_cache,
     )
 
     graph = get_graph()

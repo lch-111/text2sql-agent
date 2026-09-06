@@ -37,12 +37,8 @@ SQL_GENERATION_SYSTEM_PROMPT = """你是专业的 SQL 生成专家。根据用�
 ## 输出格式
 先写一段中文思考过程（50-150字），分析用户问题对应的表和字段，然后另起一行用 ```sql``` 包裹最终 SQL。
 
-## 思考过程示例
-分析用户问题“`各省销售额`”，需要统计每个省份的销售总额，涉及 `orders` 表的 `province` 和 `total_amount` 字段，需要按 province 分组求和。
-
-```sql
-SELECT province, SUM(total_amount) as total_sales FROM `orders` GROUP BY province ORDER BY total_sales DESC
-```"""
+## 关键警告
+⚠️ 下方【数据库表结构】中的表名是唯一的真实表名。你的思考过程和 SQL 中出现的所有表名、字段名**必须**严格从下方 Schema 中选取，禁止使用任何来自训练数据的表名（如 orders、products、users 等常见电商表名，若不在下方 Schema 中则不可使用）。"""
 
 SQL_GENERATION_PROMPT_TEMPLATE = """
 【用户问题】
@@ -55,6 +51,7 @@ SQL_GENERATION_PROMPT_TEMPLATE = """
 ## 强制规则
 - 表名必须严格使用上方 Schema 中列出的真实表名
 - 字段名只能使用 Schema 中真实存在的列名
+- 【已识别的字段映射】中已明确标注的字段名，必须优先使用；如果你认为问题涉及的字段不在 Schema 或映射中，必须输出「无法确定：XXX」并返回空 SQL，禁止猜测字段名或表名
 - 先输出 50-150 字中文思考过程分析问题对应的表和字段，再输出 SQL
 """
 
@@ -74,9 +71,13 @@ def fix_sql_quoting(sql: str) -> str:
     sql = re.sub(
         r"(?i)(=|>|<|>=|<=|!=|IN)\s*`([^`]+)`\s*",
         lambda m: (
-            f"{m.group(1)} '{m.group(2)}' "
-            if not m.group(2).isdigit()
-            else m.group(0)
+            # 纯数字字面量：去掉反引号。反引号会让 MySQL 把它当列名（如
+            # `WHERE YEAR(order_date) = `2019`` 报 1054 Unknown column），
+            # 故应还原为裸数字。
+            f"{m.group(1)} {m.group(2)} "
+            if re.fullmatch(r"-?\d+(\.\d+)?", m.group(2))
+            # 其余内容视作文本字面量，补单引号（原逻辑）
+            else f"{m.group(1)} '{m.group(2)}' "
         ),
         sql,
     )

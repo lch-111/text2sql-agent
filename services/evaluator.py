@@ -1,13 +1,15 @@
 """
 ==============================================================================
-自动化评估流水线 — Golden Dataset + 量化指标 —— 【核心亮点】
+自动化评估流水线 — 动态评估数据集 + 量化指标 —— 【核心亮点】
 ==============================================================================
 设计思路：
   在 Text-to-SQL 系统中，评估至关重要——你不能"感觉"它工作得好，
   而要"证明"它工作得好。
 
   本模块实现:
-  1. Golden Dataset：20+ 条覆盖典型业务的测试用例（含标准 SQL 答案）
+  1. 动态评估数据集：评估启动时基于「当前连接库」自动生成用例（含标准 SQL
+     答案），由 services/eval_dataset_builder.py 用模板启发式完成；不再硬编码
+     依赖某张业务表，切换任意数据库都能跑出有意义、可执行的评估。
   2. 评估指标：
      - 执行准确率 (Execution Accuracy)：生成的 SQL 执行结果与标准 SQL 是否一致
      - SQL 语法正确率：生成的 SQL 是否能被数据库正常执行
@@ -15,13 +17,14 @@
   3. 评估报告：结构化输出到 JSON 文件，用于后续展示
 
   评估流程:
-    对 Golden Dataset 中的每一条:
+    对评估数据集中的每一条:
       问题 → Agent 生成 SQL → 执行 → 与标准 SQL 结果比对 → 打分
 ==============================================================================
 """
 
 import json
 import logging
+import os
 import re
 import time
 import traceback
@@ -238,10 +241,34 @@ class Evaluator:
       从缓存系统统计获取
     """
 
-    def __init__(self):
-        self.dataset = GOLDEN_DATASET
+    def __init__(self, dataset: List[Dict] = None, db=None):
+        """
+        初始化评估器。
+
+        参数:
+            dataset: 评估用例列表。为 None 时自动基于「当前连接库」动态生成
+                     （见 services/eval_dataset_builder.py，不再依赖硬编码黄金数据集，
+                       因此切换任意数据库都能评估，不会出现标准 SQL 引用不存在表而全 0）
+            db: 数据库管理器实例（默认取全局单例）
+
+        说明:
+            动态构建仅做只读 introspection + SELECT 采样/自校验，不改库、不落盘。
+        """
+        self.db = db or get_db()
+        self.dataset = dataset
+        if self.dataset is None:
+            self.dataset = self._build_dataset()
         self.results: List[Dict] = []
-        self.db = get_db()
+
+    def _build_dataset(self) -> List[Dict]:
+        """惰性导入构造器并动态生成评估用例（延迟 import 避免顶层循环依赖）"""
+        from services.eval_dataset_builder import build_eval_dataset
+
+        snapshot = build_eval_dataset(self.db)
+        if snapshot.skips:
+            for s in snapshot.skips[:20]:
+                logger.info("评估数据集跳过: %s | %s", s.get("category", ""), s.get("reason", ""))
+        return snapshot.cases
 
     def _compare_results(self, pred_df: pd.DataFrame, std_df: pd.DataFrame) -> Dict:
         """
@@ -303,6 +330,47 @@ class Evaluator:
 
                         report["data_match"] = match_count / total > 0.95 if total > 0 else False
                         report["match_score"] = round(match_count / total, 4) if total > 0 else 1.0
+                    elif (
+                        len(pred_df) == 1
+                        and len(std_df) == 1
+                        and len(pred_df.columns) == 1
+                        and len(std_df.columns) == 1
+                    ):
+                        # 标量结果兜底：AVG/COUNT 等聚合结果仅 1 行 1 列，生成器与标准
+                        # SQL 的列别名几乎不可能相同（如 avg_val vs total），此时列名
+                        # 交集为空无法走上面的逐列比对，改按「单元格数值」直接比。
+                        pred_val = pred_df.iloc[0, 0]
+                        std_val = std_df.iloc[0, 0]
+                        if pred_val == std_val:
+                            scalar_ok = True
+                        elif isinstance(pred_val, (int, float)) and isinstance(std_val, (int, float)):
+                            scalar_ok = abs(pred_val - std_val) < 0.01
+                        else:
+                            scalar_ok = False
+                        report["data_match"] = scalar_ok
+                        report["match_score"] = 1.0 if scalar_ok else 0.0
+                    elif len(pred_df.columns) == len(std_df.columns):
+                        # 通用兜底：列名因别名/命名差异而没有交集（如时间分析里
+                        # month/cnt 均为派生列）时，只要「行数 + 列数」一致，就按
+                        # 行内容多集比较——每格数值量化到 0.01 以吸收浮点误差，
+                        # 排序后逐行比对，可正确区分 SUM/AVG/COUNT 等口径差异。
+                        def _row_key(row):
+                            key = []
+                            for v in row:
+                                if v is None:
+                                    key.append("")
+                                elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                                    key.append(int(round(float(v) * 100)))
+                                else:
+                                    key.append(str(v))
+                            return tuple(key)
+
+                        pred_rows = sorted(_row_key(r) for r in pred_df.itertuples(index=False, name=None))
+                        std_rows = sorted(_row_key(r) for r in std_df.itertuples(index=False, name=None))
+                        n = len(pred_rows)
+                        row_match = sum(1 for a, b in zip(pred_rows, std_rows) if a == b) if n else 0
+                        report["data_match"] = (row_match / n > 0.95) if n else False
+                        report["match_score"] = round(row_match / n, 4) if n else 1.0
                 except Exception:
                     report["data_match"] = False
                     report["match_score"] = 0.0
@@ -406,7 +474,27 @@ class Evaluator:
         - 失败用例分析
         """
         if not self.results:
-            return {"error": "请先运行 run_evaluation()"}
+            # 空结果（例如动态数据集在无表/结构不足的库上为 0 条）也必须返回
+            # 结构完整、键齐全的报告，避免前端把缺失字段渲染成 NaN/崩溃。
+            reason = (
+                "当前连接库未生成任何可用评估用例（可能库中无表、无可用数据或表结构不足）。"
+                "请确认已连接包含业务表的数据库后重试。"
+            )
+            return {
+                "report_time": datetime.now().isoformat(),
+                "dataset_size": 0,
+                "message": reason,
+                "overall_metrics": {
+                    "execution_accuracy": 0.0,
+                    "sql_syntax_validity": 0.0,
+                    "error_rate": 0.0,
+                    "total_valid": 0,
+                    "total_match": 0,
+                    "total_errors": 0,
+                },
+                "category_metrics": {},
+                "case_details": [],
+            }
 
         total = len(self.results)
         valid_count = sum(1 for r in self.results if r["sql_valid"])
@@ -471,6 +559,8 @@ class Evaluator:
             report = self.generate_report()
 
         output_path = CONFIG.eval.report_path
+        # 目录可能不存在（首次运行/容器新卷），先确保父目录可写
+        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(report, f, ensure_ascii=False, indent=2)
         print(f"\n评估报告已保存: {output_path}")
@@ -505,7 +595,7 @@ if __name__ == "__main__":
     evaluator = Evaluator()
     agent = TextToSQLAgent()
 
-    # 运行全部 24 个用例的评估
+    # 运行按当前连接库动态生成的评估用例（数量随 schema 自适应）
     evaluator.run_evaluation(agent)
     report = evaluator.generate_report()
     evaluator.print_summary(report)

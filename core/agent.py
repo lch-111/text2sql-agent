@@ -409,9 +409,9 @@ class TextToSQLAgent:
     # 核心方法
     # ========================================================================
 
-    def run(self, question: str, use_cache: bool = True, conv_id: str = "") -> Dict[str, Any]:
+    def run(self, question: str, use_cache: bool = True, conv_id: str = "", thinking_mode: str = "normal") -> Dict[str, Any]:
         """
-        执行完整的 Text-to-SQL 链路（支持记忆系统）。
+        执行完整的 Text-to-SQL 链路（支持记忆系统 + 思考模式）。
 
         委托给 graph.py 的 LangGraph 状态图编排。
         自动维护多轮对话上下文（conversation_history）。
@@ -420,6 +420,7 @@ class TextToSQLAgent:
             question: 用户的自然语言问题
             use_cache: 是否启用缓存（兼容参数）
             conv_id: 对话 ID（用于对话级记忆隔离）
+            thinking_mode: "normal" | "deep" 思考模式
 
         返回:
             {
@@ -443,6 +444,8 @@ class TextToSQLAgent:
             question=question,
             conversation_history=getattr(self, '_conv_history', []),
             conv_id=conv_id,
+            thinking_mode=thinking_mode,
+            use_cache=use_cache,  # 真正下传缓存开关（False 时 graph 内读/写都跳过）
         )
 
         # 更新实例级别的对话历史

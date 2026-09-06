@@ -96,8 +96,7 @@ async def explain_chart(body: ChatRequest):
     使用 LLM 解读图表数据和 SQL，返回自然语言分析。
     """
     try:
-        from core.llm_client import BaseLLMClient
-        from core.config import CONFIG
+        from model_client import create_llm_client
 
         question = body.question  # 这里复用 ChatRequest，question 字段承载图表标题/描述
         history = body.history or []
@@ -113,10 +112,8 @@ async def explain_chart(body: ChatRequest):
         if not chart_context:
             return {"analysis": "暂无图表数据可分析"}
 
-        client = BaseLLMClient(
-            model=CONFIG.llm.generator_model,
-            name="explain-chart",
-        )
+        # 统一模型层：Key/端点按 DEEPSEEK 优先解析（model_client 收口）
+        client = create_llm_client("generator", name="explain-chart")
         prompt = (
             f"你是一名数据分析师，请解读以下查询结果，给出自然语言分析。\n"
             f"分析要点：数据整体趋势、异常点、关键结论、业务建议。\n\n"
@@ -143,8 +140,7 @@ async def chart_recommend(body: ChatRequest):
     返回：{ "chartType": "bar", "xAxis": "col1", "yAxis": "col2", "seriesField": "", "stacked": false }
     LLM 失败时降级为默认推荐（柱状图 + 首列横轴 + 次列纵轴）。
     """
-    from core.llm_client import BaseLLMClient
-    from core.config import CONFIG
+    from model_client import create_llm_client
 
     # 从 history 中取出列名和样本数据
     history = body.history or []
@@ -159,11 +155,8 @@ async def chart_recommend(body: ChatRequest):
         return {"chartType": "bar", "xAxis": columns[0] if columns else "", "yAxis": columns[1] if len(columns) > 1 else columns[0], "seriesField": "", "stacked": False}
 
     try:
-        # 使用 generator 模型（DeepSeek），图表推荐需要较强推理能力
-        client = BaseLLMClient(
-            model=CONFIG.llm.generator_model,
-            name="chart-recommend",
-        )
+        # 使用 generator 分级（DeepSeek pro），图表推荐需要较强推理能力
+        client = create_llm_client("generator", name="chart-recommend")
         rows_str = "\n".join(str(r) for r in rows[:3])
         prompt = (
             "根据列名和样本数据，推荐 ECharts 图表类型及轴配置。\n"
@@ -196,6 +189,37 @@ async def chart_recommend(body: ChatRequest):
         "seriesField": "",
         "stacked": False,
     }
+
+
+@router.post("/chart/name")
+async def chart_name(body: ChatRequest):
+    """
+    根据用户问题和查询结果列名，通过 LLM 生成简洁图表名称（2-6 字）。
+    失败时降级返回"查询结果"。
+    """
+    try:
+        from model_client import create_llm_client
+
+        question = body.question or ""
+        # history 中携带列名信息
+        history = body.history or []
+        col_hint = ""
+        for msg in history:
+            if msg.get("columns"):
+                col_hint = "、".join(msg["columns"][:5])
+                break
+
+        client = create_llm_client("generator", name="chart-name")
+        prompt = (
+            f"根据用户问题「{question}」和数据列「{col_hint}」，"
+            f"生成一个 2-6 个字的图表名称，只返回名称，不要多余内容。"
+        )
+        raw = client.generate(prompt, system_prompt="你是一名数据分析师，擅长为图表命名。")
+        title = raw.strip().strip('"').strip("'")[:20] if raw else "查询结果"
+        return {"title": title}
+    except Exception as e:
+        logger.warning(f"[chart-name] 生成失败: {e}")
+        return {"title": "查询结果"}
 
 
 # ============================================================================
@@ -768,14 +792,25 @@ async def upload_file_stream(file: UploadFile = File(...)):
 async def get_table_preview(table: str, db=Depends(get_db)):
     """获取表的前 20 行预览数据"""
     try:
-        # Validate table exists (but don't trust get_table_names blindly — some DBs may fail silently)
         tables = db.get_table_names()
-        if tables and table not in tables:
-            avail = ", ".join(tables) if tables else "无（请先连接数据库）"
+        if not tables:
             raise HTTPException(
                 status_code=400,
+                detail="当前未连接数据库或数据库中无表，请先连接数据库",
+            )
+        if table not in tables:
+            avail = ", ".join(tables) if tables else "无（请先连接数据库）"
+            raise HTTPException(
+                status_code=404,
                 detail=f"表 '{table}' 不存在。当前数据库 ({db.active_db_type}) 中的表: [{avail}]",
             )
+
+        # 关键修复：执行前先 rollback 脏事务，防止前序失败查询污染当前连接
+        try:
+            db.conn.rollback()
+        except Exception:
+            pass
+
         # Properly quote table name based on DB type (MySQL uses backticks)
         if db.active_db_type == "mysql":
             quoted = f"`{table}`"
@@ -790,7 +825,11 @@ async def get_table_preview(table: str, db=Depends(get_db)):
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        logger.error(f"[table-preview] 查询 '{table}' 失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail=f"查询表 '{table}' 时发生内部错误: {str(e)[:300]}",
+        )
 
 
 @router.post("/db/test-connection")
@@ -858,20 +897,15 @@ async def get_db_status(db=Depends(get_db)):
 
 
 @router.get("/db/suggest-questions")
-async def suggest_questions(refresh: int = 0):
+async def suggest_questions():
     """
-    根据当前数据库表结构，优先通过 LLM 推荐 3 个自然语言问题，
+    根据当前数据库表结构，通过 LLM 推荐 3 个自然语言问题，
     并返回每个问题涉及的"口语词→真实列名"映射，写入全局 KV 缓存。
 
     前端 Chat 和连接数据库后调用，展示为快捷问题按钮。
-    基于真实 Schema 的字段名和注释生成，不使用预设示例。
-
-    参数:
-      refresh: 传任意非零值（如时间戳）时使用不同的随机种子，
-               让 LLM 生成与前次不同的推荐问题（"换一批"功能）。
+    基于真实 Schema 的字段名和注释生成，不依赖任何预设硬编码。
     """
     from core.database import get_db
-    from core.config import CONFIG
     db = get_db()
 
     try:
@@ -886,100 +920,42 @@ async def suggest_questions(refresh: int = 0):
     questions = []
     field_mappings = {}
 
-    # 优先使用 LLM 生成（返回问题和字段映射）
-    if CONFIG.llm.openai_api_key:
-        try:
-            from core.llm_client import BaseLLMClient
-            client = BaseLLMClient(
-                model=CONFIG.llm.generator_model,
-                name="suggest-questions",
-            )
-            # 构建 schema 摘要
-            parts = []
-            for t in table_info[:5]:
-                cols = [f"{c['name']}({c['type']})" + (f" — {c['comment']}" if c.get('comment') else "") for c in t["columns"][:8]]
-                parts.append(f"表 {t['table_name']}({t.get('row_count', 0)}行): " + ", ".join(cols))
-            schema_text = "\n".join(parts)
+    # 通过 LLM 生成（基于真实表结构，返回字段映射）
+    try:
+        from model_client import create_llm_client
+        client = create_llm_client("generator", name="suggest-questions")
+        # 构建 schema 摘要
+        parts = []
+        for t in table_info[:5]:
+            cols = [f"{c['name']}({c['type']})" + (f" — {c['comment']}" if c.get('comment') else "") for c in t["columns"][:8]]
+            parts.append(f"表 {t['table_name']}({t.get('row_count', 0)}行): " + ", ".join(cols))
+        schema_text = "\n".join(parts)
 
-            # refresh > 0 时加入随机性提示
-            refresh_hint = ""
-            if refresh:
-                import random
-                seed = refresh % 10000
-                random.seed(seed)
-                scenarios = [
-                    "从销售分析角度",
-                    "从用户行为分析角度",
-                    "从商品运营角度",
-                    "从财务分析角度",
-                    "从库存管理角度",
-                    "从市场营销角度",
-                    "从客户服务角度",
-                    "从供应链分析角度",
-                    "从业绩增长角度",
-                    "从数据质量检查角度",
-                ]
-                chosen = scenarios[seed % len(scenarios)]
-                refresh_hint = f"请{chosen}，生成与前次不同的新问题。"
-
-            result = client.generate_json(
-                "根据以下数据库表结构，推荐 3 个用户最可能问的自然语言数据分析问题。"
-                "要求：问题贴合实际业务场景，覆盖不同表。"
-                f"{refresh_hint}"
-                "返回 JSON 对象：\n"
-                '{"questions": ["问题1", "问题2", "问题3"],\n'
-                ' "field_mappings": {"口语词1": "表名.列名", "口语词2": "表名.列名", ...}}\n'
-                "其中 field_mappings 的键是问题中用户可能说的口语化字段名，值是对应的\"表名.列名\"。\n"
-                "每个口语词映射到其最相关的数据库列。\n"
-                "仅返回 JSON，不要其他内容。\n\n"
-                f"数据库表结构：\n{schema_text}",
-                system_prompt="你是一名资深数据分析师。",
-            )
-            if result and isinstance(result, dict):
-                qs = result.get("questions", [])
-                if isinstance(qs, list) and len(qs) >= 3:
-                    questions = qs[:3]
-                fm = result.get("field_mappings", {})
-                if isinstance(fm, dict) and fm:
-                    field_mappings = fm
-            elif result and isinstance(result, list) and len(result) >= 3:
-                # 兼容旧格式：纯数组
-                questions = result[:3]
-        except Exception:
-            pass
-
-    # LLM 不可用时基于 schema 实际字段名生成（同时提取映射）
-    if not questions:
-        import random as _rand
-        table_pool = list(table_info[:5])
-        if refresh:
-            _rand.seed(refresh % 10000)
-            _rand.shuffle(table_pool)
-
-        for t in table_pool:
-            tbl = t["table_name"]
-            cols = [c["name"] for c in t["columns"]]
-            if refresh:
-                _rand.shuffle(cols)
-            if len(questions) >= 3:
-                break
-            str_col = next((c for c in cols if any(k in c.lower() for k in ('name', 'type', 'city', 'province', 'category', 'status', 'gender'))), cols[0] if cols else None)
-            num_col = next((c for c in cols if any(k in c.lower() for k in ('amount', 'price', 'count', 'sales', 'revenue', 'age', 'score'))), None)
-            if str_col and num_col:
-                questions.append(f"按{tbl}的{str_col}统计{num_col}")
-                # 从模板中提取映射：口语词取列名的中文注释或列名本身
-                field_mappings[f"{tbl}的{str_col}"] = f"{tbl}.{str_col}"
-                field_mappings[num_col] = f"{tbl}.{num_col}"
-            elif str_col:
-                questions.append(f"查看{tbl}的{str_col}分布")
-                field_mappings[str_col] = f"{tbl}.{str_col}"
-            elif num_col:
-                questions.append(f"分析{tbl}的{num_col}趋势")
-                field_mappings[num_col] = f"{tbl}.{num_col}"
-            else:
-                questions.append(f"浏览{tbl}的全部数据（{t.get('row_count', 0)} 条）")
-        while len(questions) < 3:
-            questions.append("查看所有表的记录数")
+        result = client.generate_json(
+            "根据以下数据库表结构，推荐 3 个用户最可能问的自然语言数据分析问题。"
+            "要求：问题贴合实际业务场景，覆盖不同表。"
+            "使用用户日常口语表达方式，不要出现表名和字段名。\n"
+            "返回 JSON 对象：\n"
+            '{"questions": ["问题1", "问题2", "问题3"],\n'
+            ' "field_mappings": {"口语词1": "表名.列名", "口语词2": "表名.列名", ...}}\n'
+            "其中 field_mappings 的键是问题中用户可能说的口语化字段名，值是对应的\"表名.列名\"。\n"
+            "每个口语词映射到其最相关的数据库列。\n"
+            "仅返回 JSON，不要其他内容。\n\n"
+            f"数据库表结构：\n{schema_text}",
+            system_prompt="你是一名资深数据分析师。",
+        )
+        if result and isinstance(result, dict):
+            qs = result.get("questions", [])
+            if isinstance(qs, list) and len(qs) >= 3:
+                questions = qs[:3]
+            fm = result.get("field_mappings", {})
+            if isinstance(fm, dict) and fm:
+                field_mappings = fm
+        elif result and isinstance(result, list) and len(result) >= 3:
+            # 兼容旧格式：纯数组
+            questions = result[:3]
+    except Exception as e:
+        logger.warning(f"[suggest-questions] LLM 生成失败: {e}")
 
     # 将"口语词→真实列名"映射写入全局 KV 缓存，使后续提问直接命中
     if field_mappings:
@@ -1022,15 +998,17 @@ _eval_progress = {"running": False, "total": 0, "completed": 0, "current": "", "
 
 @router.get("/eval/report")
 async def get_eval_report():
-    """获取评估报告"""
-    report_path = "eval_results/eval_report.json"
+    """获取评估报告（路径取自 CONFIG.eval.report_path，消除硬编码）"""
+    from core.config import CONFIG
+
+    report_path = CONFIG.eval.report_path
     if os.path.exists(report_path):
         try:
             with open(report_path, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
             return {"error": f"报告读取失败: {e}"}
-    return {"error": "尚未运行评估，请在终端执行: python evaluator.py"}
+    return {"error": "尚未运行评估，请在工作台评估面板点击「开始评估」"}
 
 
 @router.get("/eval/status")
@@ -1050,21 +1028,33 @@ async def eval_run_stream():
       error:    { case_id, error }
       done:     { report }
     """
-    from services.evaluator import Evaluator
-    from agent import TextToSQLAgent
 
     async def event_stream():
         global _eval_progress
-        agent = TextToSQLAgent()
-        evaluator = Evaluator()
-        dataset = evaluator.dataset
-        _SINGLE_TIMEOUT = 120  # 单个用例超时秒数
-
-        _eval_progress = {"running": True, "total": len(dataset), "completed": 0, "current": "", "results": []}
-        results = []
         sent_done = False
-
         try:
+            from services.evaluator import Evaluator
+            from core.agent import TextToSQLAgent
+            from agents.schema_retriever import reset_schema_caches
+
+            def _prepare():
+                # 动态数据集构造（introspection + 采样 + 自校验）与 agent 初始化都较慢，
+                # 放到线程池执行，避免阻塞 SSE 事件循环导致进度卡住。
+                # 构造前先清空 schema 缓存：防止 agent / 数据集读到「切库前」的
+                # 300s 脏 schema，保证与当前连接库一致。
+                reset_schema_caches()
+                return Evaluator(), TextToSQLAgent()
+
+            loop = asyncio.get_event_loop()
+            evaluator, agent = await asyncio.wait_for(
+                loop.run_in_executor(None, _prepare), timeout=90
+            )
+            dataset = evaluator.dataset
+            _SINGLE_TIMEOUT = 120
+
+            _eval_progress = {"running": True, "total": len(dataset), "completed": 0, "current": "", "results": []}
+            results = []
+
             for i, case in enumerate(dataset, 1):
                 current_label = f"[{i}/{len(dataset)}] {case.get('category','')}: {case.get('question','')[:30]}..."
                 _eval_progress["current"] = current_label
@@ -1116,6 +1106,13 @@ async def eval_run_stream():
             _eval_progress["running"] = False
             _eval_progress["report"] = report
 
+            # 落盘最新报告，修复 /api/eval/report 一直读到旧文件的问题；
+            # 落盘失败不影响 SSE 推送（仅记日志）
+            try:
+                evaluator.save_report(report)
+            except Exception as e:
+                logger.warning(f"[eval-stream] 报告落盘失败: {e}")
+
             yield _sse("done", {"report": report})
             sent_done = True
 
@@ -1138,14 +1135,21 @@ async def eval_run_stream():
                     yield _sse("done", {})
                 except GeneratorExit:
                     pass
-            logger.info(f"[eval-stream] 流结束 ({len(results)}/{len(dataset)} 用例)")
+            try:
+                count = len(results)
+            except NameError:
+                count = 0
+            logger.info(f"[eval-stream] 流结束 ({count} 用例)")
 
     return StreamingResponse(
         event_stream(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
             "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+            "X-Content-Type-Options": "nosniff",
         },
     )

@@ -216,11 +216,11 @@ class SQLSyntaxValidator:
         return ErrorCategory.UNKNOWN_ERROR
 
     def _get_recovery_hint(self, error_type: str, error_msg: str) -> str:
-        """根据错误类型给出修正建议"""
+        """根据错误类型给出修正建议（通用，不硬编码具体表名）"""
         hints = {
             ErrorCategory.SYNTAX_ERROR: "检查 SQL 关键字拼写、括号匹配和逗号位置",
-            ErrorCategory.TABLE_NOT_FOUND: "检查表名拼写，确认使用了正确的表名（users, products, orders）",
-            ErrorCategory.COLUMN_NOT_FOUND: "检查字段名拼写，确认字段属于对应的表",
+            ErrorCategory.TABLE_NOT_FOUND: "检查表名拼写，确认使用了 Schema 中列出的真实表名，不要使用训练数据中的常见表名",
+            ErrorCategory.COLUMN_NOT_FOUND: "检查字段名拼写，确认字段属于对应的表，且列名在 Schema 中真实存在",
             ErrorCategory.FUNCTION_ERROR: "SQLite 不支持此函数，尝试使用 SQLite 内置函数替代",
             ErrorCategory.JOIN_ERROR: "检查 JOIN 条件中的字段名和表名是否正确",
             ErrorCategory.GROUP_BY_ERROR: "SELECT 中的非聚合字段必须包含在 GROUP BY 中",
@@ -316,36 +316,138 @@ class TableColumnValidator:
 
     def validate_columns(self, sql: str) -> List[SQLError]:
         """
-        对 SQL 中的字段引用进行存在性检查。
+        对 SQL 中的字段引用进行存在性检查（三级校验）。
 
-        使用正则提取 `table.column` 和 `alias.column` 模式，
-        验证字段是否存在于对应表中。
+        三级校验：
+          1. sqlglot AST 分析 — 提取所有字段引用，交叉验证白名单（首选）
+          2. 正则提取 `table.column` 模式 — 验证字段存在性（兜底）
+          3. 注释内关键词检查 — 防止 LLM 在注释中隐含危险操作
+
+        白名单：仅允许数据库中真实存在的表和字段。
         """
         errors = []
         tables = self.inspector.get_table_names()
 
-        # 提取 table.column 模式
-        qualified_refs = re.findall(r'(\w+)\.(\w+)', sql)
-        for tbl, col in qualified_refs:
-            # 跳过函数调用（如 strftime, date 等）
-            if col.upper() in ("COUNT", "SUM", "AVG", "MIN", "MAX", "COALESCE", "IFNULL",
-                               "ROUND", "STRFTIME", "DATE", "DATETIME", "UPPER", "LOWER",
-                               "LENGTH", "SUBSTR", "TRIM", "REPLACE", "ABS", "TYPEOF",
-                               "INSTR", "LIKE", "BETWEEN", "IN", "NOT", "AND", "OR", "AS",
-                               "ON", "DISTINCT", "CASE", "WHEN", "THEN", "ELSE", "END",
-                               "NULL", "IS", "ORDER", "GROUP", "HAVING", "LIMIT", "OFFSET",
-                               "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "FULL", "JOIN",
-                               "DESC", "ASC", "BY"):
-                continue
-            # 检查表名是否有效
-            if tbl in tables:
-                if not self.inspector.has_column(tbl, col):
-                    valid_cols = self.inspector.get_columns(tbl)
+        # ---- Level 1: sqlglot AST 列名白名单 ----
+        try:
+            ast_errors = self._validate_columns_ast(sql, tables)
+            errors.extend(ast_errors)
+        except Exception as e:
+            logger.debug(f"[ColumnValidator] sqlglot AST 分析降级: {e}")
+
+        # 如果 AST 分析产生了错误，直接返回（避免重复报告）
+        if errors:
+            return errors
+
+        # ---- Level 2: 正则匹配（兜底） ----
+        try:
+            qualified_refs = re.findall(r'(\w+)\.(\w+)', sql)
+            for tbl, col in qualified_refs:
+                # 跳过函数调用（如 strftime, date 等）
+                if col.upper() in ("COUNT", "SUM", "AVG", "MIN", "MAX", "COALESCE", "IFNULL",
+                                   "ROUND", "STRFTIME", "DATE", "DATETIME", "UPPER", "LOWER",
+                                   "LENGTH", "SUBSTR", "TRIM", "REPLACE", "ABS", "TYPEOF",
+                                   "INSTR", "LIKE", "BETWEEN", "IN", "NOT", "AND", "OR", "AS",
+                                   "ON", "DISTINCT", "CASE", "WHEN", "THEN", "ELSE", "END",
+                                   "NULL", "IS", "ORDER", "GROUP", "HAVING", "LIMIT", "OFFSET",
+                                   "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "FULL", "JOIN",
+                                   "DESC", "ASC", "BY"):
+                    continue
+                # 检查表名是否有效
+                if tbl in tables:
+                    if not self.inspector.has_column(tbl, col):
+                        valid_cols = self.inspector.get_columns(tbl)
+                        errors.append(SQLError(
+                            error_type=ErrorCategory.COLUMN_NOT_FOUND,
+                            message=f"表 '{tbl}' 中不存在字段 '{col}'",
+                            recovery_hint=f"表 '{tbl}' 的可用字段: {', '.join(valid_cols)}",
+                        ))
+        except Exception:
+            pass
+
+        return errors
+
+    def _validate_columns_ast(self, sql: str, tables: List[str]) -> List[SQLError]:
+        """
+        使用 sqlglot AST 分析 SQL，提取所有字段引用并与数据库列白名单交叉验证。
+
+        三级反幻觉措施：
+          - 遍历 AST 找到所有 Column 节点
+          - 与 information_schema 中的真实列名交叉比对
+          - 不在白名单中的列名报告为错误
+
+        返回:
+            [SQLError, ...] — 白名单校验发现的错误列表
+        """
+        errors = []
+        try:
+            import sqlglot
+            from sqlglot import exp as sqlglot_exp
+
+            parsed = sqlglot.parse_one(sql)
+        except Exception:
+            # sqlglot 解析失败时不阻断，交由下级校验
+            return []
+
+        # 提取 SQL 中所有列引用
+        column_refs = set()
+        for col_node in parsed.find_all(sqlglot_exp.Column):
+            parts = col_node.parts
+            if parts:
+                # 取最后的列名
+                col_name = parts[-1].name if hasattr(parts[-1], 'name') else str(parts[-1])
+                if col_name and col_name.upper() not in (
+                    "COUNT", "SUM", "AVG", "MIN", "MAX", "COALESCE", "IFNULL",
+                    "ROUND", "STRFTIME", "DATE", "DATETIME", "UPPER", "LOWER",
+                    "LENGTH", "SUBSTR", "TRIM", "REPLACE", "ABS", "TYPEOF",
+                    "INSTR", "LIKE", "BETWEEN", "NULL", "IS",
+                    "ORDER", "GROUP", "HAVING", "LIMIT", "OFFSET",
+                    "LEFT", "RIGHT", "INNER", "OUTER", "CROSS", "FULL", "JOIN",
+                    "DESC", "ASC", "BY", "AS", "ON", "AND", "OR", "NOT", "IN",
+                    "DISTINCT", "CASE", "WHEN", "THEN", "ELSE", "END",
+                    "ALL", "ANY", "SOME", "EXISTS", "UNION", "INTERSECT",
+                    "EXCEPT", "FROM", "WHERE", "SELECT", "WITH", "TABLE",
+                    "TRUE", "FALSE", "NULLS", "FIRST", "LAST",
+                ):
+                    column_refs.add(col_name)
+
+        # 如果表信息可用，对每个列引用进行存在的检查
+        if tables and column_refs:
+            # 收集所有有效列名
+            valid_columns = set()
+            for tbl in tables:
+                valid_columns.update(self.inspector.get_columns(tbl))
+
+            # 检查每个引用
+            for col in column_refs:
+                # 跳过明显不是列名的（全大写、单字母等）
+                if col.isupper() and len(col) < 8:
+                    continue
+                if len(col) <= 1:
+                    continue
+                # 检查是否在任何表中存在
+                if col not in valid_columns:
+                    # 尝试模糊匹配
+                    similar = [vc for vc in valid_columns if col.lower() in vc.lower() or vc.lower() in col.lower()]
+                    hint = f"，类似字段: {', '.join(similar[:3])}" if similar else ""
                     errors.append(SQLError(
                         error_type=ErrorCategory.COLUMN_NOT_FOUND,
-                        message=f"表 '{tbl}' 中不存在字段 '{col}'",
-                        recovery_hint=f"表 '{tbl}' 的可用字段: {', '.join(valid_cols)}",
+                        message=f"字段 '{col}' 不存在于数据库任何表中（三级反幻觉校验）",
+                        recovery_hint=f"可用字段: {', '.join(list(valid_columns)[:10])}{hint}",
                     ))
+
+        # ---- Level 3: 注释内关键词检查 ----
+        # 防止 LLM 将危险操作隐藏在 SQL 注释中
+        comment_patterns = [
+            (r'--\s*(DROP|DELETE|UPDATE|INSERT|ALTER|CREATE|TRUNCATE)', "注释中包含危险操作关键词"),
+        ]
+        for pat, msg in comment_patterns:
+            if re.search(pat, sql, re.IGNORECASE):
+                errors.append(SQLError(
+                    error_type=ErrorCategory.UNKNOWN_ERROR,
+                    message=msg,
+                    recovery_hint="移除注释中的危险操作关键词",
+                ))
 
         return errors
 
@@ -428,8 +530,8 @@ class ErrorRecoveryChain:
         ),
         ErrorCategory.TABLE_NOT_FOUND: (
             "修正表名引用错误：\n"
-            "1. 确认表名拼写完全正确\n"
-            "2. 数据库中的可用表: users, products, orders\n"
+            "1. 确认表名拼写完全正确，必须使用下方 Schema 中列出的表名\n"
+            "2. 禁止使用训练数据中常见的表名（如 orders、products、users）替代真实表名\n"
             "3. 检查是否有表别名冲突"
         ),
         ErrorCategory.COLUMN_NOT_FOUND: (

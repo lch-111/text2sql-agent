@@ -10,7 +10,7 @@ from core.cache import get_cache as _get_cache
 
 
 def get_agent():
-    from agent import TextToSQLAgent
+    from core.agent import TextToSQLAgent
     return TextToSQLAgent()
 
 

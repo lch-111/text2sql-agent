@@ -479,6 +479,31 @@ class DatabaseManager:
     # 查询接口
     # ========================================================================
 
+    def _prepare_exec_sql(self, sql: str, params: Tuple) -> Tuple[str, Tuple]:
+        """
+        执行前预处理 SQL：规避 pymysql 客户端对字面百分号的插值误伤。
+
+        背景（已实证）：pymysql 只要收到非 None 的 args（SQLAlchemy 在无参执行
+        时也会传入空容器 ()/{}），就无条件执行 `query % args`。因此 SQL 中出现
+        字面 `%`（如 `LIKE '%面膜%'`、`CONCAT(...,'%')`、`DATE_FORMAT(...,'%Y-%m')`）
+        会被当作格式化占位符解析，抛
+        "not enough arguments for format string" / "unsupported format character"。
+        这会让所有含 `%` 的真实查询在 MySQL 下执行失败。
+
+        处理：仅在 MySQL、且未提供绑定参数（params 为空）时，把 `%` 双写为 `%%`，
+        经 pymysql 单次插值后还原为字面 `%`。SQLite 驱动不做 % 插值，保持原样。
+
+        参数:
+            sql: 原始 SQL
+            params: 参数化查询的参数元组（为空表示无绑定占位符）
+
+        返回:
+            (处理后的 SQL, 处理后的 params)
+        """
+        if self.active_db_type == "mysql" and not params:
+            sql = sql.replace("%", "%%")
+        return sql, params
+
     def query(self, sql: str, params: Tuple = ()) -> pd.DataFrame:
         """
         执行 SQL 查询，返回 DataFrame。
@@ -489,11 +514,20 @@ class DatabaseManager:
 
         返回:
             pandas.DataFrame 格式的查询结果
+
+        异常安全:
+            - SQL 执行失败时自动 rollback 事务，防止连接被污染
         """
         try:
+            sql, params = self._prepare_exec_sql(sql, params)
             df = pd.read_sql_query(sql, self.conn, params=params)
             return df
         except Exception as e:
+            # 关键修复：SQL 执行失败后主动回滚事务，否则后续查询全部崩在脏连接上
+            try:
+                self._connection.rollback()
+            except Exception:
+                pass
             raise RuntimeError(f"SQL 执行失败: {e}\nSQL: {sql}") from e
 
     def query_readonly(self, sql: str, params: Tuple = ()) -> pd.DataFrame:
@@ -519,6 +553,7 @@ class DatabaseManager:
                 # 安全由上游 SQLValidator 保证（只允许 SELECT）
                 pass
 
+            sql, params = self._prepare_exec_sql(sql, params)
             df = pd.read_sql_query(sql, self.conn, params=params)
             return df
         except Exception as e:

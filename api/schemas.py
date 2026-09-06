@@ -13,6 +13,7 @@ class ChatRequest(BaseModel):
     question: str
     history: Optional[List[Dict]] = None
     conv_id: Optional[str] = None  # 对话 ID（用于对话级记忆隔离）
+    thinking_mode: Optional[str] = "normal"  # "normal" | "deep" 思考模式
 
     @field_validator("question")
     @classmethod
@@ -91,3 +92,16 @@ class DbConnectionStatus(BaseModel):
     user: Optional[str] = None
     active_tables: int = 0
     tables: List[str] = []
+
+
+class DetectTypeRequest(BaseModel):
+    """大屏添加类型检测请求"""
+    sql: Optional[str] = None
+    result: Optional[List[Dict[str, Any]]] = None
+
+
+class DetectTypeResponse(BaseModel):
+    """大屏添加类型检测响应"""
+    type: str  # "metric" | "chart"
+    reason: str
+    method: str  # "sql_semantic" | "result_shape"

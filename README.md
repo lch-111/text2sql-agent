@@ -1,6 +1,6 @@
-# Text-to-SQL Agent 🤖
+# Text-to-SQL Agent 
 
-> **企业级智能数据分析 Agent** — 基于 LangGraph 的多 Agent 协作 · 物理安全护栏 · Self-Correction · 莫兰迪 UI
+> **企业级智能数据分析 Agent** — 基于 LangGraph 的多 Agent 协作 · 物理安全护栏 · Self-Correction 
 
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ed?logo=docker)](https://docker.com)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi)](https://fastapi.tiangolo.com)
@@ -28,6 +28,7 @@
 **Text-to-SQL Agent** 是一个企业级智能数据分析系统，将用户自然语言问题转化为 SQL 查询。基于 LangGraph 多 Agent 协作架构，全部推理通过云端 API（OpenAI 兼容）完成。
 
 ![数据大屏](image/image.png)
+![数据大屏](image/image1.png)
 
 ```
 用户提问 → Router 分类 → Schema 检索 + FieldResolver → SQL 生成 → Critic 校验 → SQLGuard 拦截 → 执行 → 可视化
@@ -167,7 +168,7 @@ SQL 执行失败 → search_similar_trace() → 检索 tracess/ 历史修正
 
 18 种图表类型 × 21 种配色风格，大屏采用 **3 列 GridLayout** 深色底板布局：顶部 KPI 指标栏横向排列单值指标，图表区自动填充无滚动。支持统一主题切换（预览→保存/恢复）、容器透明度调节、单图表配色独立于全局主题。图表卡片无边框扁平化设计，操作按钮悬停显示，支持拖拽吸附与缩放。全屏模式下自适应容器尺寸。
 
-![图表可视化](image/image1.png)
+![图表可视化](image/image2.png)
 
 ---
 
@@ -260,16 +261,19 @@ print(result["result"]) # [{"total_sales": 3347000}]
 
 ### 环境变量 (`.env`)
 
+模型调用经 `model_client.py` 统一收口（Key 自动按 DEEPSEEK → DASHSCOPE → OPENAI → GLM
+回退解析，部署默认沿用下方 `OPENAI_*` 方案即可）。
+
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `OPENAI_API_KEY` | - | DeepSeek 模型 API Key（阿里云百炼） |
-| `OPENAI_BASE_URL` | - | API 地址 |
-| `GLM_API_KEY` | - | GLM 模型 API Key（智谱 AI） |
-| `GLM_BASE_URL` | `https://open.bigmodel.cn/api/paas/v4` | GLM API 地址 |
-| `ROUTER_MODEL` | `glm-4-flash` | 路由/分类模型（免费） |
-| `GENERATOR_MODEL` | `deepseek-v4-flash` | SQL 生成模型 |
-| `CRITIC_MODEL` | `glm-4-flash` | SQL 校验模型（免费） |
-| `RERANKER_MODEL` | `glm-4-flash` | Schema 精排模型（免费） |
+| `OPENAI_API_KEY` | - | DeepSeek 模型 API Key（阿里云百炼），唯一必配 |
+| `OPENAI_BASE_URL` | `https://dashscope.aliyuncs.com/compatible-mode/v1` | OpenAI 兼容 API 地址 |
+| `GLM_API_KEY` | - | 旧回退 Key（可选） |
+| `GLM_BASE_URL` | 百炼兼容端点 | 旧回退端点 |
+| `ROUTER_MODEL` | `deepseek-v4-flash` | 路由/分类/工具选择模型（轻量） |
+| `GENERATOR_MODEL` | `deepseek-v4-pro-0813` | SQL 生成模型（强推理） |
+| `CRITIC_MODEL` | `deepseek-v4-pro-0813` | SQL 校验模型 |
+| `RERANKER_MODEL` | `deepseek-v4-flash` | Schema 精排模型 |
 | `ADMIN_TOKEN` | - | 管理令牌（SHA256，空=仅本地访问） |
 | `DB_TYPE` | `sqlite` | 数据库类型 |
 | `LOG_LEVEL` | `INFO` | 日志级别 |

@@ -45,6 +45,35 @@ _field_values_loaded_at: Optional[float] = None
 _FIELD_VALUES_TTL = 300
 
 
+def reset_schema_caches() -> None:
+    """
+    清空 Schema 相关全部内存缓存（字段/值映射、全字段样例值、表结构快照）。
+
+    适用场景：
+      1. 连接数据库切换后，评估或检索必须读到新库的表结构；
+      2. 外部对表结构做 DDL 修改后希望立即刷新。
+
+    为什么必须提供：
+      上述缓存（字段映射 dict、字段样例值、类级 _schema_cache）默认 TTL 为
+      300 秒。若切库/改表后 5 分钟内不清理，agent 与动态评估数据集会拿到
+      旧 schema，出现"拿着 A 库结构去查 B 库"的串库脏读。
+
+    调用方：
+      评估模块在构建动态数据集前调用一次（见 api/routes.py run-stream），
+      保证后续评估与在线问答都基于同一份最新 schema。
+    """
+    global _field_values_cache, _field_values_loaded_at
+    _field_cache.clear()              # 字段消歧缓存
+    _value_cache.clear()              # 值映射缓存
+    _field_values_cache = None        # 全字段样例值缓存（置空触发重建）
+    _field_values_loaded_at = None
+    # SchemaRetriever 类级 schema 缓存：实例读取 self._schema_cache 会回退到类属性，
+    # 故统一在类上置空即可让所有既有实例下次重新加载
+    SchemaRetriever._schema_cache = None
+    SchemaRetriever._schema_loaded_at = None
+    logger.info("[SchemaRetriever] 已清空全部 schema / 字段 / 值 内存缓存")
+
+
 def _cache_key(prefix: str, *parts: str) -> str:
     return f"{prefix}:" + ":".join(parts)
 
@@ -530,13 +559,55 @@ class SchemaRetriever:
     # 增强 Schema 文本（每字段含注释 + 样本值）
     # ========================================================================
 
+    @staticmethod
+    def _looks_like_date_text(name: str, type_str: str, samples) -> bool:
+        """
+        启发式判定某列是否是“文本型日期”（如 VARCHAR 存 'YYYY-MM-DD'）。
+
+        背景：真实库中日期常以 VARCHAR(255) 存储且无注释（如 sales_order.order_date），
+        生成器看到文本类型会倾向于手工字符串切片（SUBSTRING_INDEX）取年月，容易
+        把月份切错成“年/日”层级。若判定为文本日期，Schema 文本会提示生成器直接
+        使用 YEAR()/MONTH()/DATE_FORMAT() 等日期函数（各引擎均支持解析该文本格式）。
+
+        参数:
+            name: 列名
+            type_str: 列类型字符串（如 "VARCHAR(255)"）
+            samples: 该列样例值列表（可能为空）
+
+        返回:
+            True 表示应给生成器追加“可直接使用日期函数”的提示
+        """
+        t = (type_str or "").lower()
+        # 原生日期/时间类型（DATE/DATETIME/TIMESTAMP）本就会被当作日期使用，无需提示
+        if ("date" in t or "time" in t or "timestamp" in t) and not any(
+            k in t for k in ("char", "text")
+        ):
+            return False
+        # 仅对文本型列做判定（VARCHAR/TEXT/CLOB/STRING 或无明显数值/布尔的类型）
+        is_text = any(k in t for k in ("char", "text", "clob", "string")) or not any(
+            k in t for k in ("int", "float", "double", "decimal", "bool", "blob", "json")
+        )
+        if not is_text:
+            return False
+        # 值呈日期形态（如 2019-01-15 或 2019/1/15）是最强信号
+        val_hint = any(
+            re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}", str(v)) for v in (samples or [])[:3]
+        )
+        if val_hint:
+            return True
+        # 无样例可佐证时，列名含日期语义才提示（避免误伤普通文本列）
+        n = name.lower()
+        name_hint = any(
+            k in n for k in ("date", "time", "日期", "时间", "_at", "_dt", "year", "month")
+        )
+        return name_hint and not samples
+
     def build_schema_text(self, query: str = "") -> str:
         """
         构建增强 Schema 文本，格式：
 
-        📋 orders
-          - amount(DOUBLE)  — 订单金额  e.g. 299.00, 1580.00
-          - province(VARCHAR)  — 所在省份  e.g. 广东, 江苏
+        📋 actual_table_name
+          - column_name(TYPE)  — 列注释  e.g. val1, val2
 
         Generator Agent 直接据此生成 SQL，不再需要任何同义词映射。
         """
@@ -548,18 +619,26 @@ class SchemaRetriever:
             self.rerank(query, self.search(query))
             if query else list(schema.keys())[:3]
         )
+        # 若检索/重排序后无匹配表，降级展示全部表，防止 LLM 幻觉
+        if not selected:
+            selected = list(schema.keys())[:5]
 
         fv = self.load_field_values()
         lines = [f"【数据库表结构（{len(selected)} 张表）】"]
         for tbl in selected:
             lines.append(f"📋 {tbl}")
             for c in schema[tbl]["columns"]:
-                s = f"  - {c['name']}({c['type']})"
+                col_name = c["name"]
+                s = f"  - {col_name}({c['type']})"
                 if c.get("is_pk"):
                     s += " 🔑PK"
                 if c.get("comment"):
                     s += f"  — {c['comment']}"
-                vals = fv.get(f"{tbl}.{c['name']}", [])
+                vals = fv.get(f"{tbl}.{col_name}", [])
+                # 文本日期列提示：避免生成器改用手工字符串切片按“年/日”错取月份
+                if self._looks_like_date_text(col_name, str(c["type"]), vals):
+                    s += "  [日期型文本列：提取年/月/日必须直接用日期函数 YEAR()/MONTH()/DATE_FORMAT()，"
+                    s += "禁止用 SUBSTRING_INDEX 等手工字符串切片（会把月份切错成 年/日 层级）]"
                 if vals:
                     s += f"  e.g. {vals[0]}"
                     if len(vals) > 1:
