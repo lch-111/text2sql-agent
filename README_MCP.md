@@ -91,25 +91,32 @@ curl -i -H "Authorization: Bearer mcp-sk-你的Key" http://<服务器地址>:876
 ## 2.2 用户自助申请 Key（每用户一个专属 Token）
 
 为免去管理员手工下发 Key，仓库内置了“**GitHub Issue 申请 + Actions 自动发放**”闭环
-（参考瑞幸 MCP 的每用户专属 Token 模式）。本仓库已内置对应文件：
+（参考瑞幸 MCP 的每用户专属 Token 模式）。Key 通过 **Resend 邮件私密发送**，
+不在公开评论区显示。本仓库已内置对应文件：
 
 - `.github/ISSUE_TEMPLATE/apply-key.yml` —— 申请表单模板；
-- `.github/workflows/generate-key.yml` —— 自动生成随机 Key 并回帖的工作流。
+- `.github/workflows/generate-key.yml` —— 自动生成随机 Key 并**邮件私密发送**的工作流。
 
 **申请流程（用户侧）**
 1. 在本仓库 **New issue → 选择“申请 MCP API Key”模板**，填好称呼/邮箱后提交；提交即自动打上
    `key-request` 标签。
-2. 稍等片刻，GitHub Actions 会在该 Issue 下自动回复一条**专属随机 Key**
-   （形如 `mcp-sk-xxx-yyy-zzz`，每次申请都不同）。
-3. 拿到 Key 后，按 §2.1 用 HTTP MCP + `Authorization: Bearer <你的Key>` 连接即可。
+2. 稍等片刻，GitHub Actions 会把一条**专属随机 Key**（形如 `mcp-sk-xxx-yyy-zzz`，每次申请
+   都不同）**私密发送到你填写的邮箱**；Issue 评论区只回复“✅ Key 已发送至你的邮箱”，
+   不出现 Key 本体。
+3. 收到邮件拿到 Key 后，按 §2.1 用 HTTP MCP + `Authorization: Bearer <你的Key>` 连接即可。
    若暂时 401，说明管理员还没把这个 Key 登记进服务器环境的 `MCP_API_KEYS`，请稍候。
 
 **管理员侧（让新 Key 生效）**
-1. 首次使用前，先在仓库创建 `key-request` 标签（Settings → Labels，或
-   `gh label create key-request`），否则表单无法提交。
-2. 收到带 `key-request` 标签的 Issue（Actions 已自动回帖 Key）后，把该 Key **追加**到服务器
+1. 首次使用前，先在仓库 **Settings → Secrets and variables → Actions** 添加 Secret
+   `RESEND_API_KEY`（Resend 免费注册：<https://resend.com/api-keys>），否则发信步骤会失败。
+   建议同时在 Resend 验证发件域名——未验证时测试发件人（`onboarding@resend.dev`）
+   **只能发到账号本人的邮箱**，真实外部申请人会收不到；验证后如需自定义发件人，可给
+   `resend/resend-action@v3` 补 `from` 输入。
+2. 再创建 `key-request` 标签（Settings → Labels，或 `gh label create key-request`），
+   否则表单无法提交。
+3. 收到带 `key-request` 标签的 Issue（Actions 已邮件发出 Key）后，把该 Key **追加**到服务器
    环境变量 `MCP_API_KEYS`（逗号分隔）并重启 `mcp_server.py`，见 §2.1 启动示例。
-3. 吊销 / 轮换：从 `MCP_API_KEYS` 移除 / 替换对应 Key 后重启即可。
+4. 吊销 / 轮换：从 `MCP_API_KEYS` 移除 / 替换对应 Key 后重启即可。
 
 **WorkBuddy / Claude Desktop / Claude Code 配置示例**（都指向同一个 HTTP MCP 地址，
 各自携带自己的 Key）：
@@ -129,7 +136,7 @@ curl -i -H "Authorization: Bearer mcp-sk-你的Key" http://<服务器地址>:876
 }
 ```
 
-> 提示：Key 经公开 Issue 评论发放，仅适合无需保密的个人开发用途，请勿把 Key 提交进代码库。
+> 提示：Key 通过邮件私密发送（评论区不显示），仍请勿把 Key 转发或提交进代码库。
 > 老单 Key 变量 `MCP_API_KEY` 仍兼容；新申请的多 Key 统一走 `MCP_API_KEYS`。
 
 ---
