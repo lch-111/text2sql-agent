@@ -1,0 +1,60 @@
+name: 生成 MCP 专属 Key
+
+# =============================================================================
+# 用户自助申请 Key（参考瑞幸 MCP 的“每用户专属 Token”模式）
+#   触发：Issue 被（表单自动或手动）打上 key-request 标签且处于 open 状态。
+#   流程：生成唯一随机 Key(mcp-sk-*) → 以评论形式回复到该 Issue，把 Key 交给申请人。
+#   安全提示：
+#     - Key 以公开评论发放，仅适合无需保密的个人开发用途；如要求保密请改用私有仓库，
+#       或另行接入“邮件投递”动作。
+#     - 生成 Key 只是“发放”环节：要让服务器真正接受它，需把该 Key 追加进服务器
+#       环境变量 MCP_API_KEYS（逗号分隔多个 Key）并重启 mcp_server.py（见 README_MCP.md）。
+# =============================================================================
+on:
+  issues:
+    types: [labeled]
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  generate-key:
+    name: 生成专属 Key 并回复
+    # 仅在“被打上 key-request 标签”且 Issue 处于打开状态时执行；
+    # 已关闭的 Issue / 其它标签的增删不影响本流程。
+    if: github.event.label.name == 'key-request' && github.event.issue.state == 'open'
+    runs-on: ubuntu-latest
+    steps:
+      - name: 生成随机专属 Key 并回帖
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 每次申请都生成全新的随机串（base64url 字符集：A-Za-z0-9_-，不含 '=' 与逗号）
+          # → 天然可安全地用逗号拼接进服务器环境变量 MCP_API_KEYS。
+          key="mcp-sk-$(openssl rand -base64 24 | tr -d '=' | tr '+/' '-_')"
+          echo "::notice::已为 #${{ github.event.issue.number }} 生成 MCP Key"
+
+          gh issue comment --repo "$GITHUB_REPOSITORY" "${{ github.event.issue.number }}" --body "$(cat <<EOF
+          @${{ github.event.issue.user.login }} 你好，已为你生成**专属 MCP Key**：
+
+          \`\`\`
+          ${key}
+          \`\`\`
+
+          **使用前请知悉**
+          1. 这是你的专属 Key（每用户一个、每次申请都不同），请妥善保管，**不要公开或提交到代码仓库**。
+          2. 服务器管理员会把已发放的 Key 追加进 \`MCP_API_KEYS\`（逗号分隔）并重启服务；
+             登记完成后，下面这个 Key 即可正常鉴权。若暂时 401，请稍候或联系管理员核对登记情况。
+          3. 如不慎泄露，可在本仓库重新提交一个申请，管理员会把旧 Key 从 \`MCP_API_KEYS\` 移除。
+
+          **调用方式（HTTP MCP + Bearer 鉴权）**
+          本地验证（把 \`<你的Key>\` 换成上面的 Key）：
+
+          \`\`\`bash
+          curl -i -H "Authorization: Bearer <你的Key>" http://<服务器地址>:8765/mcp
+          \`\`\`
+
+          Claude Code / WorkBuddy 等客户端的 \`.mcp.json\` 配置示例见 README_MCP.md §2.2。
+          EOF
+          )"

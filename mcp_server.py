@@ -25,9 +25,10 @@ mcp_server.py — Text2SQL MCP Server（stdio / FastMCP 独立入口）
   python mcp_server.py --self-test     # 脱离 MCP 的自检（打印 3 个工具的调用样例）
 
 Key 鉴权（参考瑞幸 MCP 的 Bearer Token 模式）：
-  环境变量 MCP_API_KEY 设置后启用鉴权；未设置仅启动告警并放行（不破坏原有 stdio 用法）。
-  - --http 模式：ASGI 中间件在每个入站 HTTP 请求校验 Authorization: Bearer <MCP_API_KEY>
-  - stdio 模式：无 HTTP 头，若仍配置了 MCP_API_KEY 则工具层拒绝并提示改用 --http
+  环境变量 MCP_API_KEYS（逗号分隔多个 Key，支持“每用户专属 Token”，可经 GitHub Issue 自助申请）
+  设置后启用鉴权；未设置仅启动告警并放行（不破坏原有 stdio 用法）。兼容旧变量 MCP_API_KEY（单 Key）。
+  - --http 模式：ASGI 中间件在每个入站 HTTP 请求校验 Authorization: Bearer <任一个已配置 Key>
+  - stdio 模式：无 HTTP 头，若已配置 Key 则工具层拒绝并提示改用 --http
 ==============================================================================
 """
 
@@ -67,19 +68,43 @@ logger = logging.getLogger("mcp_server")
 
 # ============================================================================
 # Key 鉴权配置（参考瑞幸 MCP 的 Bearer Token 模式）
-#   环境变量 MCP_API_KEY：设置后启用 Bearer Token 鉴权；
+#   环境变量 MCP_API_KEYS：逗号分隔的多个 Key（可为“每用户专属 Token”，见 .github/
+#   ISSUE_TEMPLATE/apply-key.yml 自助申请流程）。设置后启用鉴权；
 #   未设置 → 仅启动告警、继续运行（保持原有 stdio 全放行行为，不破坏现有工具）。
+#   向后兼容：MCP_API_KEYS 为空时回退读旧的 MCP_API_KEY（单 Key），避免老部署悄悄裸奔。
 # ============================================================================
-_MCP_API_KEY = os.getenv("MCP_API_KEY", "").strip()
-if _MCP_API_KEY:
+def _load_api_keys() -> List[str]:
+    """读取鉴权 Key 列表。
+
+    优先取 MCP_API_KEYS（逗号分隔，逐项去空白、丢弃空项）；若整体为空则回退到旧的
+    单 Key 变量 MCP_API_KEY（视为仅一个 Key），保证老部署无缝迁移。
+    出参: 非空 Key 列表；两者均未配置时返回 []（表示“关闭鉴权”）。
+    """
+    keys = [k.strip() for k in os.getenv("MCP_API_KEYS", "").split(",") if k.strip()]
+    if keys:
+        return keys
+    legacy = os.getenv("MCP_API_KEY", "").strip()
+    if legacy:
+        logger.warning(
+            "检测到已废弃的环境变量 MCP_API_KEY（单 Key）。建议迁移到 MCP_API_KEYS"
+            "（逗号分隔多 Key，支持每用户自助申请，见 README_MCP.md）。本次按单 Key 继续启用鉴权。"
+        )
+        return [legacy]
+    return []
+
+
+_MCP_API_KEYS = _load_api_keys()
+if _MCP_API_KEYS:
     logger.warning(
-        "已配置 MCP_API_KEY：将启用 Bearer Token 鉴权。建议以 --http 模式启动，"
-        "供 HTTP 客户端携带 Authorization: Bearer <MCP_API_KEY> 连接。"
+        "已配置 MCP_API_KEYS（共 %d 个 Key）：将启用 Bearer Token 鉴权。建议以 --http 模式启动，"
+        "供每个用户携带各自的专属 Authorization: Bearer <Key> 连接。",
+        len(_MCP_API_KEYS),
     )
 else:
     logger.warning(
-        "未设置环境变量 MCP_API_KEY：Bearer Token 鉴权关闭，任何客户端都能调用工具。"
-        "如需开启：设置 MCP_API_KEY 并以 --http 模式启动（详见 README_MCP.md）。"
+        "未设置环境变量 MCP_API_KEYS：Bearer Token 鉴权关闭，任何客户端都能调用工具。"
+        "如需开启：把各用户申请的 Key 以逗号分隔填入 MCP_API_KEYS，并以 --http 模式启动"
+        "（用户自助申请流程见 README_MCP.md / .github/ISSUE_TEMPLATE/apply-key.yml）。"
     )
 
 # ============================================================================
@@ -438,21 +463,21 @@ def _safe_db_type() -> str:
 
 # ============================================================================
 # Key 鉴权（参考瑞幸 MCP 的 Bearer Token 模式）
-#   鉴权依据：环境变量 MCP_API_KEY。
+#   鉴权依据：环境变量 MCP_API_KEYS（逗号分隔多 Key，兼容旧单 Key MCP_API_KEY）。
 #     - HTTP 模式（--http）：ASGI 中间件在每个入站 HTTP 请求校验
-#       `Authorization: Bearer <MCP_API_KEY>`，缺失/错误 → 401（覆盖握手与工具调用）。
-#     - stdio 模式：无法携带 HTTP 头；若已配置 MCP_API_KEY，则工具层兜底拒绝并
+#       `Authorization: Bearer <任一已配置 Key>`，缺失/不匹配 → 401（覆盖握手与工具调用）。
+#     - stdio 模式：无法携带 HTTP 头；若已配置 Key，则工具层兜底拒绝并
 #       提示改用 --http，避免“看似启用实则裸奔”。
-#     - 未设置 MCP_API_KEY：任何模式均放行（兼容不开鉴权的原有部署）。
+#     - 未设置任何 Key：任何模式均放行（兼容不开鉴权的原有部署）。
 #     - --self-test 直连底层纯函数，天然跳过鉴权。
 # ============================================================================
 _RUN_TRANSPORT = "stdio"  # main() 按 CLI 在 'stdio' / 'http' 间切换（供工具层兜底判断）
 
 _UNAUTHORIZED_STDIO_MSG = (
-    "未授权：已配置 MCP_API_KEY，但当前是 stdio 运输，无法携带 HTTP Authorization 头。"
+    "未授权：已配置 MCP_API_KEYS，但当前是 stdio 运输，无法携带 HTTP Authorization 头。"
     "请改用 HTTP 模式启动：python mcp_server.py --http [--port <端口>]，"
-    "并由客户端以 headers={'Authorization': 'Bearer <MCP_API_KEY>'} 连接"
-    "（与瑞幸 MCP 相同的 Bearer Token 模式）。"
+    "并由客户端以 headers={'Authorization': 'Bearer <你申请到的专属 Key>'} 连接"
+    "（与瑞幸 MCP 相同的 Bearer Token 模式；每个用户一个专属 Key）。"
 )
 
 
@@ -479,6 +504,17 @@ def _tokens_equal(expect: str, actual: Optional[str]) -> bool:
     return hmac.compare_digest(expect.encode("utf-8"), actual.encode("utf-8"))
 
 
+def _token_is_known(token: Optional[str]) -> bool:
+    """校验 token 是否命中已配置 Key 列表（MCP_API_KEYS）中的任意一个。
+
+    逐个做常量时间比较，语义等价于 `token in _MCP_API_KEYS`，但不引入明文 `==` 的
+    时序侧信道。未配置任何 Key 时返回 False（由调用方按“关闭鉴权”自行放行）。
+    """
+    if not token or not _MCP_API_KEYS:
+        return False
+    return any(_tokens_equal(k, token) for k in _MCP_API_KEYS)
+
+
 def _check_tool_authorized() -> Optional[Dict[str, Any]]:
     """工具级兜底鉴权（HTTP 模式已在中间件层逐请求校验，此函数只管 stdio+已配 Key 的裸奔场景）。
 
@@ -486,8 +522,8 @@ def _check_tool_authorized() -> Optional[Dict[str, Any]]:
         None 表示放行；否则为统一拒绝结果 dict（结构与 query_db 的失败返回一致，
         含 ok=False 与中文 error，方便 MCP 客户端原样展示）。
     """
-    if not _MCP_API_KEY:
-        return None                    # 未配置 Key → 保持原行为（放行）
+    if not _MCP_API_KEYS:
+        return None                    # 未配置任何 Key → 保持原行为（放行）
     if _RUN_TRANSPORT == "http":
         return None                    # HTTP 模式每个请求都已通过中间件鉴权
     return {"ok": False, "error": _UNAUTHORIZED_STDIO_MSG, "code": "UNAUTHORIZED"}
@@ -496,8 +532,9 @@ def _check_tool_authorized() -> Optional[Dict[str, Any]]:
 class _BearerAuthMiddleware:
     """ASGI 中间件：HTTP 模式对每个入站请求校验 Bearer（参考瑞幸 MCP）。
 
-    仅当模块级 `_MCP_API_KEY` 非空才生效；未配置时原样转发，兼容不开鉴权的部署。
-    校验失败（头缺失或 token 不匹配）→ 直接返回 401 + JSON 错误，不进入 MCP 处理链。
+    仅当模块级 `_MCP_API_KEYS` 非空才生效；未配置时原样转发，兼容不开鉴权的部署。
+    校验失败（头缺失或 token 不在已配置 Key 列表中）→ 直接返回 401 + JSON 错误，
+    不进入 MCP 处理链。
     注意：stdout 只承载 stdio 协议，HTTP 模式下的日志/输出一律走 stderr。
     """
 
@@ -507,16 +544,16 @@ class _BearerAuthMiddleware:
 
     async def __call__(self, scope: Dict[str, Any], receive: Any, send: Any) -> None:
         """ASGI 约定入口：scope['type']=='http' 时先鉴权，通过后转发给下层应用。"""
-        if scope.get("type") == "http" and _MCP_API_KEY:
+        if scope.get("type") == "http" and _MCP_API_KEYS:
             # ASGI 的 headers 是 (bytes_key, bytes_value) 列表；统一小写键便于匹配
             headers = {
                 k.decode("latin-1").lower(): v.decode("latin-1")
                 for (k, v) in (scope.get("headers") or [])
             }
             token = _bearer_from_header(headers)
-            if not _tokens_equal(_MCP_API_KEY, token):
+            if not _token_is_known(token):
                 return await self._reject(
-                    send, "未授权：请在请求头携带 Authorization: Bearer <MCP_API_KEY>"
+                    send, "未授权：请在请求头携带 Authorization: Bearer <你申请到的专属 Key>（MCP_API_KEYS 中任一个）"
                 )
         await self._app(scope, receive, send)
 
@@ -607,9 +644,9 @@ def _run_http(host: str, port: int, path: str) -> int:
     入参:
         host/port/path: 监听地址与 streamable-http 端点路径（默认 /mcp）。
     说明:
-        - 未设置 MCP_API_KEY → 中间件放行，等同无鉴权部署；
-        - 已设置 MCP_API_KEY → 每个入站 HTTP 请求必须携带
-          `Authorization: Bearer <MCP_API_KEY>`，否则 401；
+        - 未配置任何 Key → 中间件放行，等同无鉴权部署；
+        - 已配置 MCP_API_KEYS → 每个入站 HTTP 请求必须携带
+          `Authorization: Bearer <任一已配置 Key>`，否则 401；
         - 日志/启动信息一律写 stderr（HTTP 模式不占用 stdout）。
     """
     global _RUN_TRANSPORT
@@ -637,7 +674,7 @@ def _run_http(host: str, port: int, path: str) -> int:
         print(f"HTTP MCP 初始化失败: {exc}", file=sys.stderr)
         return 1
 
-    auth_state = "已启用（需 Authorization: Bearer <MCP_API_KEY>）" if _MCP_API_KEY else "未启用（未设置 MCP_API_KEY，全放行）"
+    auth_state = "已启用（需携带任一已配置 Key）" if _MCP_API_KEYS else "未启用（未设置 MCP_API_KEYS，全放行）"
     logger.info("Text2SQL MCP Server（streamable-http）监听 http://%s:%d%s，Bearer 鉴权%s", host, port, path, auth_state)
     print(f"Text2SQL MCP 运行中: http://{host}:{port}{path}  (Bearer 鉴权{auth_state})", file=sys.stderr)
     uvicorn.run(app, host=host, port=port, log_level="warning")

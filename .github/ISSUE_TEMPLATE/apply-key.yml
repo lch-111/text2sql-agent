@@ -1,0 +1,34 @@
+name: 申请 MCP API Key
+description: 向 Text2SQL MCP Server 申请一个专属访问 Key（每用户一个、每次申请都不同）。提交后仓库机器人会自动生成并回复。
+title: "[Key 申请] 请为我生成一个专属 MCP Key"
+labels:
+  - key-request
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## 申请专属 MCP Key
+
+        提交本表单后，GitHub Actions 会自动生成形如 `mcp-sk-xxx-yyy-zzz` 的**专属随机 Key**
+        并作为评论回复到本 Issue。拿到 Key 后即可按 README_MCP.md §2.1 的方式通过
+        HTTP MCP（`Authorization: Bearer <你的 Key>`）连接服务器。
+
+        > 提示：
+        > 1. 请先确认仓库已创建 `key-request` 标签（否则表单无法提交）；
+        > 2. Key 通过公开评论发放，仅建议用于无需保密的个人开发用途；请勿把 Key 提交到代码库。
+  - type: input
+    id: name
+    attributes:
+      label: 你的称呼 / 昵称
+      description: 便于系统侧登记这个 Key 归属哪个用户（会写进回复标题，仅用于区分）。
+      placeholder: 例：张三 / zhangsan-bot
+    validations:
+      required: true
+  - type: input
+    id: email
+    attributes:
+      label: 联系邮箱
+      description: 后续该 Key 失效、轮换或扩容通知会发到这个邮箱。
+      placeholder: you@example.com
+    validations:
+      required: true
