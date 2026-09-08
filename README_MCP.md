@@ -29,8 +29,56 @@
 - Python **3.10+**（与主项目一致）
 - 已安装主项目依赖（`pip install -r requirements.txt`）——因为工具内部 import `core/agents/services/harness`
 - 已安装 MCP SDK：`pip install mcp`（兼容 **1.x（FastMCP）与 2.x（MCPServer）**，`mcp_server.py` 会自动识别）
+- （可选）环境变量 `MCP_API_KEY`：启用 **Bearer Token 鉴权**（参考瑞幸 MCP 模式）。
+  未设置仅启动告警并全放行（不改变原有 stdio 用法）；设置后须以 `--http` 模式启动，
+  客户端携带 `Authorization: Bearer <MCP_API_KEY>` 连接，详见 §2.1。
 
 > 提示：如果系统里同时有多个 Python，务必让**启动 MCP 的那个 Python** 同时具备上面两项。
+
+---
+
+## 2.1 Key 鉴权与 HTTP 部署（可选，参考瑞幸 Bearer Token 模式）
+
+默认 **stdio 运输没有 HTTP 头**，因此 `Authorization: Bearer` 校验只有在 **HTTP 模式
+（streamable-http）** 下才真正生效。行为约定：
+
+- 未设置 `MCP_API_KEY` → 无论 stdio 还是 HTTP 都**全放行**（保持原有用法，不破坏现有工具）。
+- 设置 `MCP_API_KEY` 后以 `--http` 启动 → 每个入站 HTTP 请求必须携带
+  `Authorization: Bearer <MCP_API_KEY>`，**缺失或令牌错误一律返回 401**（覆盖握手与工具调用）；
+- 设置 `MCP_API_KEY` 但仍用 stdio 启动 → stdio 无头可验，工具层会**拒绝调用**并提示改用
+  `--http`，避免“看似启用实则裸奔”。
+- `--self-test` 直连底层纯函数，**始终跳过鉴权**，可在设置 Key 的环境下正常自检。
+
+**HTTP 方式启动服务**（host / port / path 均可配，默认 `127.0.0.1:8765` 与 `/mcp`）：
+
+```bash
+MCP_API_KEY=你的-Token python mcp_server.py --http --host 0.0.0.0 --port 8765
+```
+
+> Git Bash（MSYS）会把带前导斜杠的命令行参数（如 `--path /mcp`）转成盘符路径导致启动失败；
+> cmd / PowerShell 无此问题。默认路径 `/mcp` 无需显式传 `--path`，裸段会自动补前导斜杠。
+
+客户端按瑞幸同款方式连接（HTTP MCP + headers），以 Claude Code 项目 `.mcp.json` 为例：
+
+```json
+{
+  "mcpServers": {
+    "text2sql": {
+      "type": "http",
+      "url": "http://127.0.0.1:8765/mcp",
+      "headers": { "Authorization": "Bearer 你的-Token" }
+    }
+  }
+}
+```
+
+本地快速验证拦截：
+
+```bash
+curl -i http://127.0.0.1:8765/mcp                                        # → 401
+curl -i -H "Authorization: Bearer 错的Token" http://127.0.0.1:8765/mcp   # → 401
+curl -i -H "Authorization: Bearer 你的-Token" http://127.0.0.1:8765/mcp  # → 放行（进入 MCP 层）
+```
 
 ---
 
@@ -150,6 +198,8 @@ docker exec text2sql-app python mcp_server.py --self-test
 | `query_db` 报 `400 Arrearage` | 模型 Key 对应的厂商账号**欠费**（外部账单问题，非代码）。见 CLAUDE.md 修复记录；先去厂商控制台充值，或换另一个 Key 供应商的变量 |
 | `explain_sql` 的 plan 为空但 suggestions 有值 | 数据库对 EXPLAIN 支持有限/语句复杂导致真实计划失败；此时仍返回规则式优化建议，属正常降级 |
 | MCP 进程异常无输出 | 所有日志走 **stderr**，stdout 只承载协议。启动时把 `2>` 重定向到文件看：`python mcp_server.py 2> mcp.log` |
+| 配了 `MCP_API_KEY` 但工具被拒（未授权） | stdio 无 HTTP 头，无法完成 Bearer 校验。改用 §2.1 的 `--http` 启动并以 HTTP 客户端（url + headers）连接；或删掉 `MCP_API_KEY` 回到全放行 |
+| HTTP 模式请求一律 401 | 请求头缺失或 `Authorization: Bearer <MCP_API_KEY>` 写错。对照 §2.1 的 headers 写法；未配置 Key 时不会出现 401 |
 
 ---
 

@@ -3,12 +3,16 @@ __pycache__/
 *.py[cod]
 *.so
 .venv/
+# Windows 原生虚拟环境（跑 mcp_server.py 用），仅本机本地
+.venv-win/
 venv/
 env/
 
 # Environment
 .env
 .env.local
+# MCP 配置含 API Key/DB 密码，按需本地注册，不提交
+.mcp.json
 
 # IDE
 .idea/
